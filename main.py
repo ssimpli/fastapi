@@ -14,15 +14,20 @@ except ImportError:
 
 app = FastAPI()
 
-# 설정
-DRIVER_START_TIME = 360  # 06:00
-LOADING_TIME = 30
-UNLOADING_TIME = 30
+# ==========================================
+# 1. 설정 및 환경변수
+# ==========================================
+DRIVER_START_TIME = 360  # 기사님 출근 06:00
+LOADING_TIME = 30        # 상차 시간
+UNLOADING_TIME = 30      # 하역 시간
 
 NAVER_ID = os.environ.get("NAVER_CLIENT_ID")
 NAVER_SECRET = os.environ.get("NAVER_CLIENT_SECRET")
 
-# 모델 정의
+# ==========================================
+# 2. 데이터 모델
+# ==========================================
+
 class OrderItem(BaseModel):
     주유소명: str
     휘발유: int = 0
@@ -64,12 +69,14 @@ class OptimizationRequest(BaseModel):
     orders: List[OrderItem]
     vehicles: List[VehicleItem]
 
-# 데이터 로드
-MATRIX_DATA = {}
+# ==========================================
+# 3. 데이터 로드 & 네이버 거리 계산
+# ==========================================
 NODE_INFO = {}
+DIST_CACHE = {}
 
 def load_data():
-    global MATRIX_DATA, NODE_INFO
+    global NODE_INFO
     raw_data = None
     url = os.environ.get("JEJU_MATRIX_URL")
     if url:
@@ -77,6 +84,7 @@ def load_data():
             res = requests.get(url, timeout=10)
             if res.status_code == 200: raw_data = res.json()
         except: pass
+    
     if not raw_data and os.path.exists("jeju_distance_matrix_full.json"):
         try:
             with open("jeju_distance_matrix_full.json", "r", encoding="utf-8") as f:
@@ -84,12 +92,11 @@ def load_data():
         except: pass
 
     if raw_data:
-        if "matrix" in raw_data: MATRIX_DATA = raw_data["matrix"]
-        else: MATRIX_DATA = raw_data
+        # 좌표 정보 로드
         if "node_info" in raw_data:
             for node in raw_data["node_info"]:
                 NODE_INFO[node["name"]] = {"lat": node["lat"], "lon": node["lon"]}
-        print(f"✅ 데이터 로드 완료: {len(MATRIX_DATA)}개")
+        print(f"✅ 좌표 데이터 로드 완료: {len(NODE_INFO)}개 지점")
 
 load_data()
 
@@ -122,7 +129,6 @@ def get_driving_time(start_name, end_name):
                     return minutes
         except: pass
 
-    # 하버사인
     R = 6371
     dLat = math.radians(goal['lat'] - start['lat'])
     dLon = math.radians(goal['lon'] - start['lon'])
@@ -131,26 +137,19 @@ def get_driving_time(start_name, end_name):
     dist_km = R * c
     return max(5, int((dist_km / 40) * 60 * 1.3))
 
-DIST_CACHE = {}
+# ==========================================
+# 4. 배차 알고리즘 (다회전 VRP)
+# ==========================================
 
-# 배차 로직
 def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
     debug_logs = []
     pending_orders = []
-    
-    # 로그 메시지 개선
     for o in all_orders:
-        target_amt = o.휘발유 if fuel_type == "휘발유" else (o.등유 + o.경유)
-        total_amt = o.휘발유 + o.등유 + o.경유
-        
-        if target_amt > 0:
-            pending_orders.append(o)
+        amt = o.휘발유 if fuel_type == "휘발유" else (o.등유 + o.경유)
+        if amt > 0: pending_orders.append(o)
         else:
-            if total_amt > 0:
-                # 다른 유종 주문은 정상이므로 로그 남기지 않음 (혼란 방지)
-                pass 
-            else:
-                debug_logs.append(f"⚠️ 제외됨(주문량 없음): {o.주유소명}")
+            if fuel_type == "휘발유" and (o.등유 > 0 or o.경유 > 0): pass
+            else: debug_logs.append(f"제외됨(주문량0): {o.주유소명}")
 
     my_vehicles = [v for v in all_vehicles if v.유종 == fuel_type]
     
@@ -187,7 +186,6 @@ def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
 
     return {
         "status": "success", 
-        "total_delivered": sum(r['total_load'] for r in final_schedule),
         "routes": final_schedule, 
         "unassigned_orders": skipped_list,
         "debug_logs": debug_logs
@@ -254,13 +252,32 @@ def run_ortools(orders, vehicles, start_times, fuel_type):
                 node_idx = manager.IndexToNode(index)
                 if node_idx > 0: fulfilled_indices.add(node_idx - 1)
                 t_val = solution.Min(time_dim.CumulVar(index))
-                path.append({"location": locs[node_idx], "time": t_val, "load": demands[node_idx]})
+                
+                # 좌표 정보 추가 (HTML 지도 그리기용)
+                node_name = locs[node_idx]
+                coord = NODE_INFO.get(node_name, {"lat": 0, "lon": 0})
+                
+                path.append({
+                    "location": node_name,
+                    "lat": coord["lat"],
+                    "lon": coord["lon"],
+                    "time": t_val,
+                    "load": demands[node_idx]
+                })
                 load += demands[node_idx]
                 index = solution.Value(routing.NextVar(index))
             
             node_idx = manager.IndexToNode(index)
             end_time = solution.Min(time_dim.CumulVar(index))
-            path.append({"location": depot, "time": end_time, "load": 0})
+            coord = NODE_INFO.get(depot, {"lat": 0, "lon": 0})
+            
+            path.append({
+                "location": depot,
+                "lat": coord["lat"],
+                "lon": coord["lon"],
+                "time": end_time, 
+                "load": 0
+            })
             
             if len(path) > 2:
                 routes.append({
