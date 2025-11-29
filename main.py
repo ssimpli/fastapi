@@ -17,9 +17,9 @@ app = FastAPI()
 # ==========================================
 # 1. 설정 및 환경변수
 # ==========================================
-DRIVER_START_TIME = 360  # 기사님 출근 06:00
-LOADING_TIME = 20        # 상차 시간
-UNLOADING_TIME = 30      # 하역 시간
+DRIVER_START_TIME = 360 
+LOADING_TIME = 30      
+UNLOADING_TIME = 30    
 
 NAVER_ID = os.environ.get("NAVER_CLIENT_ID")
 NAVER_SECRET = os.environ.get("NAVER_CLIENT_SECRET")
@@ -27,7 +27,6 @@ NAVER_SECRET = os.environ.get("NAVER_CLIENT_SECRET")
 # ==========================================
 # 2. 데이터 모델
 # ==========================================
-
 class OrderItem(BaseModel):
     주유소명: str
     휘발유: int = 0
@@ -70,74 +69,50 @@ class OptimizationRequest(BaseModel):
     vehicles: List[VehicleItem]
 
 # ==========================================
-# 3. 데이터 로드 (핵심 수정 부분)
+# 3. 데이터 로드 & 네이버 API 함수
 # ==========================================
 NODE_INFO = {}
-DIST_CACHE = {}
-MATRIX_DATA = {}
+DIST_CACHE = {} # 시간/거리 캐시
+PATH_CACHE = {} # 상세 경로 좌표 캐시
 
 def load_data():
-    global NODE_INFO, MATRIX_DATA
+    global NODE_INFO
     raw_data = None
-    
-    # 1. URL 다운로드
     url = os.environ.get("JEJU_MATRIX_URL")
     if url:
         try:
-            print(f"🌐 URL 데이터 다운로드 시도...")
             res = requests.get(url, timeout=15)
-            if res.status_code == 200: 
-                raw_data = res.json()
-                print("✅ URL 로드 성공!")
-        except Exception as e: 
-            print(f"❌ URL 로드 에러: {e}")
+            if res.status_code == 200: raw_data = res.json()
+        except: pass
     
-    # 2. 파일 로드 (백업)
     if not raw_data and os.path.exists("jeju_distance_matrix_full.json"):
         try:
             with open("jeju_distance_matrix_full.json", "r", encoding="utf-8") as f:
                 raw_data = json.load(f)
-            print("✅ 로컬 파일 로드 성공!")
         except: pass
 
     if raw_data:
-        # ★ 중요: 데이터가 리스트([])로 감싸져 있으면 첫 번째 요소를 꺼냄
         if isinstance(raw_data, list) and len(raw_data) > 0:
-            print("ℹ️ 리스트 구조 감지: 첫 번째 요소를 데이터로 사용합니다.")
             raw_data = raw_data[0]
-
-        # 좌표 정보 로드
         if "node_info" in raw_data:
             for node in raw_data["node_info"]:
-                # lat, lon 정보를 NODE_INFO 딕셔너리에 저장
                 NODE_INFO[node["name"]] = {"lat": node["lat"], "lon": node["lon"]}
-            print(f"📍 좌표 정보 로드 완료: {len(NODE_INFO)}개 지점")
-        else:
-            print("⚠️ 경고: 'node_info' 키를 찾을 수 없습니다. 좌표가 0,0으로 나올 수 있습니다.")
-
-        # 매트릭스 정보 로드
-        if "matrix" in raw_data:
-            MATRIX_DATA = raw_data["matrix"]
-            print(f"📊 거리 매트릭스 로드 완료: {len(MATRIX_DATA)}개 출발지")
-        else:
-            MATRIX_DATA = raw_data # 구조가 다를 경우 통째로 사용 시도
+        print(f"✅ 데이터 로드 완료: {len(NODE_INFO)}개 지점")
 
 load_data()
 
+# 운행 시간 계산 (매트릭스 구성용)
 def get_driving_time(start_name, end_name):
     key = f"{start_name}->{end_name}"
     if key in DIST_CACHE: return DIST_CACHE[key]
-    
-    # 좌표 정보 없으면 기본 20분
-    if start_name not in NODE_INFO or end_name not in NODE_INFO: 
-        return 20 
+    if start_name not in NODE_INFO or end_name not in NODE_INFO: return 20
     
     start = NODE_INFO[start_name]
     goal = NODE_INFO[end_name]
     
     if NAVER_ID and NAVER_SECRET:
         try:
-            url = "https://naveropenapi.apigw.ntruss.com/map-direction/v1/driving"
+            url = "https://maps.apigw.ntruss.com/map-direction/v1/driving"
             headers = {
                 "x-ncp-apigw-api-key-id": NAVER_ID,
                 "x-ncp-apigw-api-key": NAVER_SECRET
@@ -156,7 +131,7 @@ def get_driving_time(start_name, end_name):
                     return minutes
         except: pass
 
-    # 하버사인 공식 (백업용)
+    # 하버사인 (백업)
     R = 6371
     dLat = math.radians(goal['lat'] - start['lat'])
     dLon = math.radians(goal['lon'] - start['lon'])
@@ -164,6 +139,39 @@ def get_driving_time(start_name, end_name):
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
     dist_km = R * c
     return max(5, int((dist_km / 40) * 60 * 1.3))
+
+# ★ 추가된 함수: 상세 경로 좌표 가져오기 (결과 생성용)
+def get_detailed_path_geometry(start_name, end_name):
+    key = f"{start_name}->{end_name}"
+    if key in PATH_CACHE: return PATH_CACHE[key]
+    if start_name not in NODE_INFO or end_name not in NODE_INFO: return []
+
+    start = NODE_INFO[start_name]
+    goal = NODE_INFO[end_name]
+
+    if NAVER_ID and NAVER_SECRET:
+        try:
+            url = "https://naveropenapi.apigw.ntruss.com/map-direction/v1/driving"
+            headers = {
+                "x-ncp-apigw-api-key-id": NAVER_ID,
+                "x-ncp-apigw-api-key": NAVER_SECRET
+            }
+            params = {
+                "start": f"{start['lon']},{start['lat']}",
+                "goal": f"{goal['lon']},{goal['lat']}",
+                "option": "trafast"
+            }
+            res = requests.get(url, headers=headers, params=params)
+            if res.status_code == 200:
+                json_res = res.json()
+                if json_res["code"] == 0:
+                    # 네이버는 [[lon, lat], [lon, lat]...] 형태로 줌
+                    path_data = json_res["route"]["trafast"][0]["path"]
+                    PATH_CACHE[key] = path_data
+                    return path_data
+        except: pass
+    
+    return [] # 실패 시 빈 리스트
 
 # ==========================================
 # 4. 배차 알고리즘
@@ -189,7 +197,6 @@ def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
     
     for round_num in range(1, 6):
         if not pending_orders: break
-        
         available_indices = [i for i, t in vehicle_state.items() if t < 1080 - 60]
         if not available_indices: break
         
@@ -210,12 +217,11 @@ def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
             
         pending_orders = remaining
 
-    skipped_list = [{"name": o.주유소명, "reason": "시간/차량 부족"} for o in pending_orders]
-
     return {
         "status": "success", 
+        "total_delivered": sum(r['total_load'] for r in final_schedule),
         "routes": final_schedule, 
-        "unassigned_orders": skipped_list,
+        "unassigned_orders": [{"name": o.주유소명} for o in pending_orders],
         "debug_logs": debug_logs
     }
 
@@ -256,16 +262,12 @@ def run_ortools(orders, vehicles, start_times, fuel_type):
     demands = [0] + [ (o.휘발유 if fuel_type=="휘발유" else o.등유+o.경유) for o in orders ]
     def demand_callback(from_i):
         return demands[manager.IndexToNode(from_i)]
-    
     cap_idx = routing.RegisterUnaryTransitCallback(demand_callback)
-    routing.AddDimensionWithVehicleCapacity(
-        cap_idx, 0, [v.수송용량 for v in vehicles], True, "Capacity"
-    )
+    routing.AddDimensionWithVehicleCapacity(cap_idx, 0, [v.수송용량 for v in vehicles], True, "Capacity")
 
     search_params = pywrapcp.DefaultRoutingSearchParameters()
     search_params.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
     search_params.time_limit.seconds = 5
-    
     solution = routing.SolveWithParameters(search_params)
     
     routes = []
@@ -276,39 +278,47 @@ def run_ortools(orders, vehicles, start_times, fuel_type):
             index = routing.Start(v_idx)
             path = []
             load = 0
+            geometry_list = [] # 상세 경로 좌표 모음
+
             while not routing.IsEnd(index):
                 node_idx = manager.IndexToNode(index)
                 if node_idx > 0: fulfilled_indices.add(node_idx - 1)
                 
                 t_val = solution.Min(time_dim.CumulVar(index))
-                
-                # 좌표 추가 (지도 그리기용)
                 node_name = locs[node_idx]
-                # NODE_INFO에서 좌표를 찾습니다. 없으면 0,0
                 coord = NODE_INFO.get(node_name, {"lat": 0, "lon": 0})
                 
                 path.append({
                     "location": node_name,
-                    "lat": coord["lat"],
-                    "lon": coord["lon"],
-                    "time": t_val,
-                    "load": demands[node_idx]
+                    "lat": coord["lat"], "lon": coord["lon"],
+                    "time": t_val, "load": demands[node_idx]
                 })
                 load += demands[node_idx]
-                index = solution.Value(routing.NextVar(index))
-            
+
+                # 다음 지점
+                next_index = solution.Value(routing.NextVar(index))
+                if not routing.IsEnd(next_index):
+                    next_node_idx = manager.IndexToNode(next_index)
+                    # 현재->다음 상세 경로 가져오기 (API 호출)
+                    segment_path = get_detailed_path_geometry(node_name, locs[next_node_idx])
+                    if segment_path: geometry_list.extend(segment_path)
+                
+                index = next_index
+
+            # 복귀
             node_idx = manager.IndexToNode(index)
             end_time = solution.Min(time_dim.CumulVar(index))
-            
-            # 마지막 센터 좌표
             depot_coord = NODE_INFO.get(depot, {"lat": 0, "lon": 0})
+            
+            # 마지막 지점 -> 센터 복귀 경로
+            last_loc = path[-1]["location"]
+            return_path = get_detailed_path_geometry(last_loc, depot)
+            if return_path: geometry_list.extend(return_path)
             
             path.append({
                 "location": depot,
-                "lat": depot_coord["lat"],
-                "lon": depot_coord["lon"],
-                "time": end_time,
-                "load": 0
+                "lat": depot_coord["lat"], "lon": depot_coord["lon"],
+                "time": end_time, "load": 0
             })
             
             if len(path) > 2:
@@ -316,7 +326,8 @@ def run_ortools(orders, vehicles, start_times, fuel_type):
                     "internal_idx": v_idx, 
                     "end_time": end_time, 
                     "total_load": load, 
-                    "path": path
+                    "path": path,
+                    "geometry": geometry_list # 상세 경로 좌표 포함!
                 })
                 
     remaining = [orders[i] for i in range(len(orders)) if i not in fulfilled_indices]
@@ -330,4 +341,4 @@ def optimize(req: OptimizationRequest):
 
 @app.get("/")
 def health():
-    return {"status": "ok", "naver_enabled": bool(NAVER_ID), "nodes": len(NODE_INFO)}
+    return {"status": "ok"}
