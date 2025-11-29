@@ -4,9 +4,8 @@ import requests
 import math
 from typing import List, Dict, Any
 from fastapi import FastAPI
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
-# OR-Tools
 try:
     from ortools.constraint_solver import routing_enums_pb2
     from ortools.constraint_solver import pywrapcp
@@ -16,26 +15,54 @@ except ImportError:
 app = FastAPI()
 
 # ==========================================
-# 1. 설정 및 데이터 모델
+# 1. 설정 및 환경변수
 # ==========================================
+DRIVER_START_TIME = 360  # 기사님 출근 06:00 (유공 08:00 배송 대응)
+LOADING_TIME = 30        # 상차 시간
+UNLOADING_TIME = 30      # 하역 시간
 
-# 작업 소요 시간 설정 (분 단위)
-LOADING_TIME = 20   # 센터에서 기름 넣는 시간
-UNLOADING_TIME = 30 # 주유소에서 기름 내리는 시간
-RETURN_SPEED_KPH = 60 # 복귀 시 평균 시속 (직선거리용 백업)
-
-# 네이버 API 키 (Railway Variables에서 설정)
+# 네이버 API 키 (Railway Variables에서 설정 필수)
 NAVER_ID = os.environ.get("NAVER_CLIENT_ID")
 NAVER_SECRET = os.environ.get("NAVER_CLIENT_SECRET")
+
+# ==========================================
+# 2. 데이터 모델 (스마트 보정 기능)
+# ==========================================
 
 class OrderItem(BaseModel):
     주유소명: str
     휘발유: int = 0
     등유: int = 0
     경유: int = 0
-    start_min: int = 540  # 09:00
-    end_min: int = 1080   # 18:00
-    priority: int = 2     # 1:긴급
+    start_min: int = 540
+    end_min: int = 1080
+    priority: int = 2
+    
+    class Config:
+        extra = 'allow'
+
+    @model_validator(mode='before')
+    @classmethod
+    def flatten_data(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            # 1. 중첩된 데이터(주문량 등) 끄집어내기
+            for key in ['주문량', 'order', 'data']:
+                if key in data and isinstance(data[key], dict):
+                    inner = data[key]
+                    if any(k in inner for k in ['휘발유', '경유', '등유']):
+                        data.update(inner)
+            
+            # 2. 숫자 변환 ("150" -> 150)
+            for field in ['휘발유', '등유', '경유', 'start_min', 'end_min', 'priority']:
+                if field in data:
+                    try:
+                        if data[field] == "" or data[field] is None:
+                            data[field] = 0
+                        else:
+                            data[field] = int(data[field])
+                    except:
+                        data[field] = 0
+        return data
 
 class VehicleItem(BaseModel):
     차량번호: str
@@ -47,35 +74,39 @@ class OptimizationRequest(BaseModel):
     vehicles: List[VehicleItem]
 
 # ==========================================
-# 2. 데이터 로드 & 네이버 거리 계산
+# 3. 데이터 로드 & 네이버 거리 계산 로직
 # ==========================================
-NODE_INFO = {} # 좌표 정보 { "주유소명": {"lat": 33..., "lon": 126...} }
-DIST_CACHE = {} # 거리 계산 캐시
+NODE_INFO = {}  # 좌표 정보 { "주유소명": {"lat": ..., "lon": ...} }
+DIST_CACHE = {} # 거리 계산 캐시 (API 비용 절약)
 
-def load_basic_data():
+def load_data():
     global NODE_INFO
-    # 환경변수 URL 우선
-    url = os.environ.get("JEJU_MATRIX_URL")
-    data = None
+    raw_data = None
     
+    # 1. URL 다운로드 (매트릭스 및 좌표 정보)
+    url = os.environ.get("JEJU_MATRIX_URL")
     if url:
         try:
             res = requests.get(url, timeout=10)
-            if res.status_code == 200: data = res.json()
+            if res.status_code == 200: raw_data = res.json()
         except: pass
     
-    if not data and os.path.exists("jeju_distance_matrix_full.json"):
-        with open("jeju_distance_matrix_full.json", "r", encoding="utf-8") as f:
-            data = json.load(f)
-            
-    if data:
-        # node_info 리스트를 딕셔너리로 변환
-        if "node_info" in data:
-            for node in data["node_info"]:
+    # 2. 파일 로드 (백업)
+    if not raw_data and os.path.exists("jeju_distance_matrix_full.json"):
+        try:
+            with open("jeju_distance_matrix_full.json", "r", encoding="utf-8") as f:
+                raw_data = json.load(f)
+        except: pass
+
+    if raw_data:
+        # 좌표 정보 로드 (네이버 API용)
+        if "node_info" in raw_data:
+            for node in raw_data["node_info"]:
                 NODE_INFO[node["name"]] = {"lat": node["lat"], "lon": node["lon"]}
         print(f"✅ 좌표 데이터 로드 완료: {len(NODE_INFO)}개 지점")
 
-load_basic_data()
+# 서버 시작 시 로드
+load_data()
 
 def get_driving_time(start_name, end_name):
     # 1. 캐시 확인
@@ -84,18 +115,21 @@ def get_driving_time(start_name, end_name):
     
     # 2. 좌표 확인
     if start_name not in NODE_INFO or end_name not in NODE_INFO:
-        return 30 # 좌표 없으면 기본 30분
+        return 20 # 좌표 없으면 기본 20분
         
     start = NODE_INFO[start_name]
     goal = NODE_INFO[end_name]
     
-    # 3. 네이버 API 호출
+    # 3. 네이버 API 호출 (URL 및 헤더 수정됨)
     if NAVER_ID and NAVER_SECRET:
         try:
-            url = "https://naveropenapi.apigw.ntruss.com/map-direction/v1/driving"
+            # 요청하신 URL로 수정
+            url = "https://https://maps.apigw.ntruss.com/map-direction/v1/driving"
+            
+            # 요청하신 헤더 키(소문자)로 수정
             headers = {
-                "X-NCP-APIGW-API-KEY-ID": NAVER_ID,
-                "X-NCP-APIGW-API-KEY": NAVER_SECRET
+                "x-ncp-apigw-api-key-id": NAVER_ID,
+                "x-ncp-apigw-api-key": NAVER_SECRET
             }
             params = {
                 "start": f"{start['lon']},{start['lat']}",
@@ -113,116 +147,122 @@ def get_driving_time(start_name, end_name):
         except Exception as e:
             print(f"Naver API Error: {e}")
 
-    # 4. API 실패 시 하버사인 공식으로 직선거리 시간 추정
+    # 4. API 실패/미설정 시 하버사인 공식 (직선거리 추정)
     R = 6371
     dLat = math.radians(goal['lat'] - start['lat'])
     dLon = math.radians(goal['lon'] - start['lon'])
     a = math.sin(dLat/2)**2 + math.cos(math.radians(start['lat'])) * math.cos(math.radians(goal['lat'])) * math.sin(dLon/2)**2
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
     dist_km = R * c
-    # 시속 40km 가정 + 신호대기 1.3배
-    est_time = int((dist_km / 40) * 60 * 1.3)
-    return max(5, est_time) # 최소 5분
+    est_time = int((dist_km / 40) * 60 * 1.3) # 시속 40km + 신호대기 보정
+    return max(5, est_time)
 
 # ==========================================
-# 3. 다회전 배차 알고리즘 (핵심)
+# 4. 배차 알고리즘 (다회전 VRP)
 # ==========================================
 
 def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
-    # 해당 유종 데이터 필터링
+    debug_logs = []
+    
+    # 유효 주문 필터링
     pending_orders = []
     for o in all_orders:
         amt = o.휘발유 if fuel_type == "휘발유" else (o.등유 + o.경유)
         if amt > 0: pending_orders.append(o)
-        
+        else:
+            if fuel_type == "휘발유" and (o.등유 > 0 or o.경유 > 0): pass
+            else: debug_logs.append(f"제외됨(주문량0): {o.주유소명}")
+
     my_vehicles = [v for v in all_vehicles if v.유종 == fuel_type]
     
     if not pending_orders or not my_vehicles:
-        return {"status": "skipped", "routes": []}
+        return {"status": "skipped", "debug": debug_logs, "routes": []}
 
-    # 차량 상태 초기화 (모든 차량 09:00 시작)
-    # vehicle_state[i] = 배차 가능한 시간 (분)
-    vehicle_state = {i: 540 for i in range(len(my_vehicles))} 
-    
+    # 차량 상태 초기화 (06:00 시작)
+    vehicle_state = {i: DRIVER_START_TIME for i in range(len(my_vehicles))} 
     final_schedule = []
     
-    # 반복 배차 (최대 5회전까지 시도)
+    # 최대 5회전
     for round_num in range(1, 6):
-        if not pending_orders: break # 주문 다 처리했으면 끝
+        if not pending_orders: break
         
-        # 현재 배차 가능한 차량 선별 (18:00 이전 복귀 가능한 차만)
-        available_indices = [i for i, t in vehicle_state.items() if t < 1020] # 17:00 이후엔 출발 안함
+        # 18:00 이전에 출발 가능한 차만 선별
+        available_indices = [i for i, t in vehicle_state.items() if t < 1080 - 60]
         if not available_indices: break
         
-        # 이번 회차용 차량 리스트 구성
-        current_round_vehicles = [my_vehicles[i] for i in available_indices]
-        current_round_start_times = [vehicle_state[i] for i in available_indices]
+        current_vehicles = [my_vehicles[i] for i in available_indices]
+        current_starts = [vehicle_state[i] for i in available_indices]
         
-        # OR-Tools 실행 (1회전)
-        round_routes, remaining = run_single_vrp(
-            pending_orders, 
-            current_round_vehicles, 
-            current_round_start_times,
-            fuel_type
-        )
+        # 최적화 실행 (네이버 거리 적용)
+        routes, remaining = run_ortools(pending_orders, current_vehicles, current_starts, fuel_type)
         
-        # 결과 저장 및 상태 업데이트
-        for r in round_routes:
-            # r['vehicle_index']는 available_indices 리스트 내의 인덱스임
+        if not routes and len(remaining) == len(pending_orders):
+            debug_logs.append(f"Round {round_num}: 배차 불가 (시간 부족 등)")
+            break
+
+        for r in routes:
             real_v_idx = available_indices[r['internal_idx']]
             
-            # 복귀 시간 + 상차 시간 = 다음 출발 시간
-            next_start_time = r['end_time'] + LOADING_TIME
-            vehicle_state[real_v_idx] = next_start_time
+            # 다음 회차 출발 시간 = 복귀시간 + 상차(20분)
+            vehicle_state[real_v_idx] = r['end_time'] + LOADING_TIME
             
-            # 결과에 회차 정보 추가
             r['round'] = round_num
             r['vehicle_id'] = my_vehicles[real_v_idx].차량번호
             final_schedule.append(r)
             
-        # 남은 주문으로 업데이트
         pending_orders = remaining
 
-    return {"status": "success", "routes": final_schedule, "remaining_orders": len(pending_orders)}
+    skipped_list = [{"name": o.주유소명, "reason": "시간/차량 부족"} for o in pending_orders]
 
-def run_single_vrp(orders, vehicles, start_times, fuel_type):
-    # 1. 노드 구성
+    return {
+        "status": "success", 
+        "total_delivered": sum(r['total_load'] for r in final_schedule),
+        "routes": final_schedule, 
+        "unassigned_orders": skipped_list,
+        "debug_logs": debug_logs
+    }
+
+def run_ortools(orders, vehicles, start_times, fuel_type):
     depot = "제주물류센터"
     locs = [depot] + [o.주유소명 for o in orders]
     N = len(locs)
     
-    # 2. 매트릭스 생성 (필요한 부분만 API 호출)
+    # 1. 거리 매트릭스 생성 (네이버 API get_driving_time 사용)
     durations = [[0]*N for _ in range(N)]
     for i in range(N):
         for j in range(N):
             if i != j:
                 durations[i][j] = get_driving_time(locs[i], locs[j])
 
-    # 3. OR-Tools 설정
     manager = pywrapcp.RoutingIndexManager(N, len(vehicles), 0)
     routing = pywrapcp.RoutingModel(manager)
 
     def time_callback(from_i, to_i):
-        f = manager.IndexToNode(from_i)
-        t = manager.IndexToNode(to_i)
-        travel = durations[f][t]
-        # 도착지 하역 시간 추가 (출발지/복귀지 제외)
+        f, t = manager.IndexToNode(from_i), manager.IndexToNode(to_i)
         service = UNLOADING_TIME if t != 0 else 0
-        return travel + service
+        return durations[f][t] + service
 
     transit_idx = routing.RegisterTransitCallback(time_callback)
     routing.SetArcCostEvaluatorOfAllVehicles(transit_idx)
     
-    # 시간 제약 (차량별 출발 시간이 다름!)
-    routing.AddDimension(transit_idx, 1000, 1440, False, "Time")
+    routing.AddDimension(transit_idx, 1440, 1440, False, "Time")
     time_dim = routing.GetDimensionOrDie("Time")
     
-    # 차량별 시작 시간 설정
+    # 차량별 시작 시간
     for i in range(len(vehicles)):
         idx = routing.Start(i)
         time_dim.CumulVar(idx).SetMin(int(start_times[i]))
 
-    # 용량 제약
+    # 방문지별 시간 창
+    time_dim.CumulVar(routing.Start(0)).SetRange(0, 1440)
+    for i, order in enumerate(orders):
+        index = manager.NodeToIndex(i + 1)
+        time_dim.CumulVar(index).SetRange(order.start_min, order.end_min)
+        
+        # Priority 1(긴급)은 페널티 10만, 일반은 1000
+        penalty = 100000 if order.priority == 1 else 1000
+        routing.AddDisjunction([index], penalty)
+
     demands = [0] + [ (o.휘발유 if fuel_type=="휘발유" else o.등유+o.경유) for o in orders ]
     def demand_callback(from_i):
         return demands[manager.IndexToNode(from_i)]
@@ -232,14 +272,12 @@ def run_single_vrp(orders, vehicles, start_times, fuel_type):
         cap_idx, 0, [v.수송용량 for v in vehicles], True, "Capacity"
     )
 
-    # 4. 풀기
     search_params = pywrapcp.DefaultRoutingSearchParameters()
     search_params.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
-    search_params.time_limit.seconds = 5
+    search_params.time_limit.seconds = 5 # 5초 제한
     
     solution = routing.SolveWithParameters(search_params)
     
-    # 5. 결과 파싱
     routes = []
     fulfilled_indices = set()
     
@@ -279,7 +317,7 @@ def run_single_vrp(orders, vehicles, start_times, fuel_type):
     return routes, remaining
 
 # ==========================================
-# 4. 엔드포인트
+# 5. 실행
 # ==========================================
 @app.post("/optimize")
 def optimize(req: OptimizationRequest):
@@ -289,4 +327,4 @@ def optimize(req: OptimizationRequest):
 
 @app.get("/")
 def health():
-    return {"status": "ok", "naver_api": bool(NAVER_ID)}
+    return {"status": "ok", "naver_enabled": bool(NAVER_ID), "nodes": len(NODE_INFO)}
