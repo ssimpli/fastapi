@@ -1,5 +1,5 @@
-fastapi==0.100.0
-hypercorn==0.14.4
-ortools
-pydantic
-requests
+fastapi==0.109.0
+hypercorn==0.16.0
+ortools==9.8.3296
+pydantic==2.6.0
+requests==2.31.0
