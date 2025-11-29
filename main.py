@@ -15,24 +15,28 @@ except ImportError:
 app = FastAPI()
 
 # ==========================================
-# 1. 설정 및 환경변수
+# 1. 시간 설정 (분 단위)
 # ==========================================
-DRIVER_START_TIME = 360 
-LOADING_TIME = 20      
-UNLOADING_TIME = 30    
+# 07:00 = 420분
+DRIVER_START_TIME = 420 
+# 점심시간: 12:00(720분) ~ 13:00(780분), 60분간
+LUNCH_START = 720
+LUNCH_DURATION = 60
+# 업무 마감: 18:00 (1080분) -> 복귀 마지노선
+WORK_END_TIME = 1080
 
-# [디버깅용] 현재 로드된 환경변수 키 목록 출력 (값은 보안상 출력 안함)
-print("🔍 현재 서버 환경변수 목록:", list(os.environ.keys()))
+LOADING_TIME = 30      # 상차 시간
+UNLOADING_TIME = 30    # 하역 시간
 
-# 환경변수 읽기 (유연한 처리)
+# 환경변수 읽기
 NAVER_ID = os.environ.get("NAVER_CLIENT_ID") or os.environ.get("x-ncp-apigw-api-key-id")
 NAVER_SECRET = os.environ.get("NAVER_CLIENT_SECRET") or os.environ.get("x-ncp-apigw-api-key")
 
 if not NAVER_ID or not NAVER_SECRET:
     print("⚠️ [경고] 네이버 지도 API 키가 설정되지 않았습니다.")
 else:
-    masked_id = NAVER_ID[:2] + "*" * 5 if NAVER_ID else "None"
-    print(f"✅ 네이버 지도 API 키 로드 성공 (ID: {masked_id})")
+    masked = NAVER_ID[:2] + "*" * 4
+    print(f"✅ 네이버 지도 API 키 로드됨 ({masked})")
 
 # ==========================================
 # 2. 데이터 모델
@@ -42,7 +46,8 @@ class OrderItem(BaseModel):
     휘발유: int = 0
     등유: int = 0
     경유: int = 0
-    start_min: int = 540
+    # 기본 배송 가능 시간은 업무 시간 전체로 설정 (점심시간은 로직에서 제외시킴)
+    start_min: int = 420  
     end_min: int = 1080
     priority: int = 2
     
@@ -79,10 +84,10 @@ class OptimizationRequest(BaseModel):
     vehicles: List[VehicleItem]
 
 # ==========================================
-# 3. 데이터 로드 (속도 최적화)
+# 3. 데이터 로드 & 네이버 API
 # ==========================================
 NODE_INFO = {}
-MATRIX_DATA = {} # 거리 데이터 캐시
+MATRIX_DATA = {}
 DIST_CACHE = {}
 PATH_CACHE = {}
 
@@ -90,137 +95,97 @@ def load_data():
     global NODE_INFO, MATRIX_DATA
     raw_data = None
     url = os.environ.get("JEJU_MATRIX_URL")
-    
-    # 1. URL 다운로드 시도
     if url:
         try:
-            print(f"🌐 URL 데이터 다운로드 시도...")
             res = requests.get(url, timeout=15)
-            if res.status_code == 200: 
-                raw_data = res.json()
-                print("✅ URL에서 매트릭스 데이터 로드 성공!")
-            else: 
-                print(f"❌ URL 로드 실패: {res.status_code}")
-        except Exception as e:
-            print(f"❌ URL 에러: {e}")
+            if res.status_code == 200: raw_data = res.json()
+        except: pass
     
-    # 2. 파일 로드 (URL 실패 시 백업)
     if not raw_data and os.path.exists("jeju_distance_matrix_full.json"):
         try:
             with open("jeju_distance_matrix_full.json", "r", encoding="utf-8") as f:
                 raw_data = json.load(f)
-            print("📂 로컬 파일에서 데이터 로드 성공!")
         except: pass
 
     if raw_data:
-        # 리스트 구조 처리
         if isinstance(raw_data, list) and len(raw_data) > 0:
             raw_data = raw_data[0]
-            
-        # 좌표 정보 로드
         if "node_info" in raw_data:
             for node in raw_data["node_info"]:
                 NODE_INFO[node["name"]] = {"lat": node["lat"], "lon": node["lon"]}
-            print(f"✅ 좌표 데이터 준비 완료: {len(NODE_INFO)}개 지점")
-            
-        # 거리 매트릭스 로드 (핵심!)
         if "matrix" in raw_data:
             MATRIX_DATA = raw_data["matrix"]
-            print(f"✅ 거리 매트릭스 준비 완료: {len(MATRIX_DATA)}개 지점")
         else:
-            print("⚠️ [주의] JSON에 'matrix' 키가 없습니다. API 호출로 대체합니다(느림).")
+            MATRIX_DATA = raw_data
+        print(f"✅ 데이터 준비 완료 (노드 {len(NODE_INFO)}개, 매트릭스 {len(MATRIX_DATA)}개)")
 
 load_data()
 
-# 거리/시간 계산 (최적화된 버전)
 def get_driving_time(start_name, end_name):
     key = f"{start_name}->{end_name}"
     if key in DIST_CACHE: return DIST_CACHE[key]
     
-    # 1순위: 미리 로드된 매트릭스 파일 사용 (가장 빠름)
+    # 1순위: 파일 매트릭스 (속도)
     if start_name in MATRIX_DATA and end_name in MATRIX_DATA[start_name]:
         try:
-            # 데이터가 km 단위라고 가정하고 시간(분)으로 변환
-            # 시속 40km/h 가정: 거리(km) * 1.5 = 소요시간(분)
-            dist_val = float(MATRIX_DATA[start_name][end_name])
-            minutes = int(dist_val * 1.5)
-            # 너무 짧으면 기본 5분
+            dist = float(MATRIX_DATA[start_name][end_name])
+            # 거리(km)기반 시간 추정: 시속 35km/h (제주 시내/국도 복합)
+            minutes = int((dist / 35) * 60)
             return max(5, minutes)
-        except:
-            pass
+        except: pass
 
-    # 2순위: 좌표가 없으면 기본값
-    if start_name not in NODE_INFO or end_name not in NODE_INFO: 
-        return 20
-    
-    # 3순위: 네이버 API (매트릭스 파일에 데이터가 없을 때만 호출)
-    # (최적화 단계에서 API를 남발하면 타임아웃 되므로 가급적 파일 사용 권장)
-    if NAVER_ID and NAVER_SECRET:
+    # 2순위: 네이버 API
+    if start_name in NODE_INFO and end_name in NODE_INFO and NAVER_ID:
         try:
             url = "https://maps.apigw.ntruss.com/map-direction/v1/driving"
             headers = {
-                "X-NCP-APIGW-API-KEY-ID": NAVER_ID,
-                "X-NCP-APIGW-API-KEY": NAVER_SECRET
+                "x-ncp-apigw-api-key-id": NAVER_ID,
+                "x-ncp-apigw-api-key": NAVER_SECRET
             }
-            start = NODE_INFO[start_name]
-            goal = NODE_INFO[end_name]
+            s = NODE_INFO[start_name]
+            g = NODE_INFO[end_name]
             params = {
-                "start": f"{start['lon']},{start['lat']}",
-                "goal": f"{goal['lon']},{goal['lat']}",
+                "start": f"{s['lon']},{s['lat']}",
+                "goal": f"{g['lon']},{g['lat']}",
                 "option": "trafast"
             }
-            res = requests.get(url, headers=headers, params=params, timeout=3)
-            if res.status_code == 200:
-                json_res = res.json()
-                if json_res["code"] == 0:
-                    minutes = int(json_res["route"]["trafast"][0]["summary"]["duration"] / 60000)
-                    DIST_CACHE[key] = minutes
-                    return minutes
+            res = requests.get(url, headers=headers, params=params, timeout=2)
+            if res.status_code == 200 and res.json()["code"] == 0:
+                m = int(res.json()["route"]["trafast"][0]["summary"]["duration"] / 60000)
+                DIST_CACHE[key] = m
+                return m
         except: pass
 
-    # 4순위: 하버사인 백업
-    start = NODE_INFO[start_name]
-    goal = NODE_INFO[end_name]
-    R = 6371
-    dLat = math.radians(goal['lat'] - start['lat'])
-    dLon = math.radians(goal['lon'] - start['lon'])
-    a = math.sin(dLat/2)**2 + math.cos(math.radians(start['lat'])) * math.cos(math.radians(goal['lat'])) * math.sin(dLon/2)**2
-    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
-    dist_km = R * c
-    return max(5, int((dist_km / 40) * 60 * 1.3))
+    return 20 # 기본값
 
-# 상세 경로 좌표 가져오기 (결과 생성 시에만 호출)
 def get_detailed_path_geometry(start_name, end_name):
     key = f"{start_name}->{end_name}"
     if key in PATH_CACHE: return PATH_CACHE[key]
-    if start_name not in NODE_INFO or end_name not in NODE_INFO: return []
-    if not NAVER_ID or not NAVER_SECRET: return []
+    if start_name not in NODE_INFO or end_name not in NODE_INFO or not NAVER_ID: return []
 
     try:
-        start = NODE_INFO[start_name]
-        goal = NODE_INFO[end_name]
         url = "https://maps.apigw.ntruss.com/map-direction/v1/driving"
         headers = {
-            "X-NCP-APIGW-API-KEY-ID": NAVER_ID,
-            "X-NCP-APIGW-API-KEY": NAVER_SECRET
+            "x-ncp-apigw-api-key-id": NAVER_ID,
+            "x-ncp-apigw-api-key": NAVER_SECRET
         }
+        s = NODE_INFO[start_name]
+        g = NODE_INFO[end_name]
         params = {
-            "start": f"{start['lon']},{start['lat']}",
-            "goal": f"{goal['lon']},{goal['lat']}",
+            "start": f"{s['lon']},{s['lat']}",
+            "goal": f"{g['lon']},{g['lat']}",
             "option": "trafast"
         }
         res = requests.get(url, headers=headers, params=params, timeout=5)
-        if res.status_code == 200:
-            json_res = res.json()
-            if json_res["code"] == 0:
-                path_data = json_res["route"]["trafast"][0]["path"]
-                PATH_CACHE[key] = path_data
-                return path_data
+        if res.status_code == 200 and res.json()["code"] == 0:
+            path = res.json()["route"]["trafast"][0]["path"]
+            PATH_CACHE[key] = path
+            return path
     except: pass
     return []
 
 # ==========================================
-# 4. 배차 알고리즘
+# 4. 배차 알고리즘 (점심시간 적용)
 # ==========================================
 
 def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
@@ -229,41 +194,62 @@ def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
     for o in all_orders:
         amt = o.휘발유 if fuel_type == "휘발유" else (o.등유 + o.경유)
         if amt > 0: pending_orders.append(o)
-        else:
-            if fuel_type == "휘발유" and (o.등유 > 0 or o.경유 > 0): pass
-            else: debug_logs.append(f"제외됨(주문량0): {o.주유소명}")
 
     my_vehicles = [v for v in all_vehicles if v.유종 == fuel_type]
     
     if not pending_orders or not my_vehicles:
-        return {"status": "skipped", "routes": [], "debug_logs": debug_logs}
+        return {"status": "skipped", "routes": [], "debug_logs": []}
 
+    # 모든 차량 07:00 시작
     vehicle_state = {i: DRIVER_START_TIME for i in range(len(my_vehicles))} 
     final_schedule = []
     
+    # 회차 반복 (최대 5회)
     for round_num in range(1, 6):
         if not pending_orders: break
-        available_indices = [i for i, t in vehicle_state.items() if t < 1080 - 60]
+        
+        # 업무 종료(18:00) 1시간 전까지만 출발 가능
+        available_indices = [i for i, t in vehicle_state.items() if t < WORK_END_TIME - 60]
         if not available_indices: break
         
         current_vehicles = [my_vehicles[i] for i in available_indices]
         current_starts = [vehicle_state[i] for i in available_indices]
         
-        routes, remaining = run_ortools(pending_orders, current_vehicles, current_starts, fuel_type)
+        # 점심시간 보정: 만약 출발 시간이 11:30 ~ 13:00 사이라면, 13:00 이후로 강제 이동
+        # (점심 먹고 출발해라)
+        adjusted_starts = []
+        for t in current_starts:
+            # 점심시간에 걸치거나 너무 가까우면 13:00(780분)으로 미룸
+            if t > LUNCH_START - 30 and t < LUNCH_START + LUNCH_DURATION:
+                adjusted_starts.append(LUNCH_START + LUNCH_DURATION)
+            else:
+                adjusted_starts.append(t)
+        
+        routes, remaining = run_ortools(pending_orders, current_vehicles, adjusted_starts, fuel_type)
         
         if not routes and len(remaining) == len(pending_orders):
             break
 
         for r in routes:
             real_v_idx = available_indices[r['internal_idx']]
-            vehicle_state[real_v_idx] = r['end_time'] + LOADING_TIME
+            
+            # 복귀 후 다음 출발 시간 계산
+            next_time = r['end_time'] + LOADING_TIME
+            
+            # 만약 운행 중에 점심시간이 끼었다면? (도착시간이 12시를 넘김)
+            # OR-Tools에서 IntervalVar로 처리했으므로 r['end_time']에 이미 반영되어 있을 것임.
+            # 혹시 모르니 다음 출발 시간이 점심시간이면 뒤로 미룸
+            if next_time >= LUNCH_START and next_time < LUNCH_START + LUNCH_DURATION:
+                next_time = LUNCH_START + LUNCH_DURATION
+
+            vehicle_state[real_v_idx] = next_time
             r['round'] = round_num
             r['vehicle_id'] = my_vehicles[real_v_idx].차량번호
             final_schedule.append(r)
             
         pending_orders = remaining
 
-    skipped_list = [{"name": o.주유소명, "reason": "시간/차량 부족"} for o in pending_orders]
+    skipped_list = [{"name": o.주유소명} for o in pending_orders]
 
     return {
         "status": "success", 
@@ -278,7 +264,6 @@ def run_ortools(orders, vehicles, start_times, fuel_type):
     locs = [depot] + [o.주유소명 for o in orders]
     N = len(locs)
     
-    # 1. 거리 매트릭스 생성 (여기서 API 대신 로컬 매트릭스 활용)
     durations = [[0]*N for _ in range(N)]
     for i in range(N):
         for j in range(N):
@@ -294,13 +279,26 @@ def run_ortools(orders, vehicles, start_times, fuel_type):
 
     transit_idx = routing.RegisterTransitCallback(time_callback)
     routing.SetArcCostEvaluatorOfAllVehicles(transit_idx)
+    
+    # 시간 차원 추가 (최대 24시간)
     routing.AddDimension(transit_idx, 1440, 1440, False, "Time")
     time_dim = routing.GetDimensionOrDie("Time")
     
+    # 1. 차량별 출발 시간 설정
     for i in range(len(vehicles)):
         idx = routing.Start(i)
         time_dim.CumulVar(idx).SetMin(int(start_times[i]))
 
+    # 2. 점심시간(휴식) 설정: 12:00~13:00 (720~780)
+    # 차량이 이 시간에는 어떤 노드도 방문하거나 이동을 완료할 수 없게 함
+    solver = routing.solver()
+    for i in range(len(vehicles)):
+        # 12시에 시작해서 60분간 지속되는 '휴식' 간격 추가
+        # ForceStart=True(720분에 강제 시작)
+        lunch_break = solver.FixedDurationIntervalVar(LUNCH_START, LUNCH_START, LUNCH_DURATION, False, "Lunch")
+        time_dim.SetBreakIntervalsOfVehicle([lunch_break], i, [])
+
+    # 3. 주유소별 시간 창
     time_dim.CumulVar(routing.Start(0)).SetRange(0, 1440)
     for i, order in enumerate(orders):
         index = manager.NodeToIndex(i + 1)
@@ -308,6 +306,7 @@ def run_ortools(orders, vehicles, start_times, fuel_type):
         penalty = 100000 if order.priority == 1 else 1000
         routing.AddDisjunction([index], penalty)
 
+    # 4. 용량 제약
     demands = [0] + [ (o.휘발유 if fuel_type=="휘발유" else o.등유+o.경유) for o in orders ]
     def demand_callback(from_i):
         return demands[manager.IndexToNode(from_i)]
@@ -317,6 +316,7 @@ def run_ortools(orders, vehicles, start_times, fuel_type):
     search_params = pywrapcp.DefaultRoutingSearchParameters()
     search_params.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
     search_params.time_limit.seconds = 5
+    
     solution = routing.SolveWithParameters(search_params)
     
     routes = []
@@ -327,7 +327,7 @@ def run_ortools(orders, vehicles, start_times, fuel_type):
             index = routing.Start(v_idx)
             path = []
             load = 0
-            geometry_list = [] # 상세 경로
+            geometry_list = []
 
             while not routing.IsEnd(index):
                 node_idx = manager.IndexToNode(index)
@@ -344,7 +344,6 @@ def run_ortools(orders, vehicles, start_times, fuel_type):
                 })
                 load += demands[node_idx]
 
-                # 상세 경로는 여기서 API 호출 (횟수 적음)
                 next_index = solution.Value(routing.NextVar(index))
                 if not routing.IsEnd(next_index):
                     next_node_idx = manager.IndexToNode(next_index)
@@ -357,6 +356,7 @@ def run_ortools(orders, vehicles, start_times, fuel_type):
             end_time = solution.Min(time_dim.CumulVar(index))
             depot_coord = NODE_INFO.get(depot, {"lat": 0, "lon": 0})
             
+            # 마지막 복귀 경로
             last_loc = path[-1]["location"]
             return_path = get_detailed_path_geometry(last_loc, depot)
             if return_path: geometry_list.extend(return_path)
@@ -387,8 +387,4 @@ def optimize(req: OptimizationRequest):
 
 @app.get("/")
 def health():
-    return {
-        "status": "ok", 
-        "matrix_loaded": len(MATRIX_DATA) > 0, 
-        "naver_api": bool(NAVER_ID)
-    }
+    return {"status": "ok"}
