@@ -18,7 +18,7 @@ app = FastAPI()
 # 1. 설정 및 환경변수
 # ==========================================
 DRIVER_START_TIME = 360  # 기사님 출근 06:00
-LOADING_TIME = 30        # 상차 시간
+LOADING_TIME = 20        # 상차 시간
 UNLOADING_TIME = 30      # 하역 시간
 
 NAVER_ID = os.environ.get("NAVER_CLIENT_ID")
@@ -70,47 +70,74 @@ class OptimizationRequest(BaseModel):
     vehicles: List[VehicleItem]
 
 # ==========================================
-# 3. 데이터 로드 & 네이버 거리 계산
+# 3. 데이터 로드 (핵심 수정 부분)
 # ==========================================
 NODE_INFO = {}
 DIST_CACHE = {}
+MATRIX_DATA = {}
 
 def load_data():
-    global NODE_INFO
+    global NODE_INFO, MATRIX_DATA
     raw_data = None
+    
+    # 1. URL 다운로드
     url = os.environ.get("JEJU_MATRIX_URL")
     if url:
         try:
-            res = requests.get(url, timeout=10)
-            if res.status_code == 200: raw_data = res.json()
-        except: pass
+            print(f"🌐 URL 데이터 다운로드 시도...")
+            res = requests.get(url, timeout=15)
+            if res.status_code == 200: 
+                raw_data = res.json()
+                print("✅ URL 로드 성공!")
+        except Exception as e: 
+            print(f"❌ URL 로드 에러: {e}")
     
+    # 2. 파일 로드 (백업)
     if not raw_data and os.path.exists("jeju_distance_matrix_full.json"):
         try:
             with open("jeju_distance_matrix_full.json", "r", encoding="utf-8") as f:
                 raw_data = json.load(f)
+            print("✅ 로컬 파일 로드 성공!")
         except: pass
 
     if raw_data:
+        # ★ 중요: 데이터가 리스트([])로 감싸져 있으면 첫 번째 요소를 꺼냄
+        if isinstance(raw_data, list) and len(raw_data) > 0:
+            print("ℹ️ 리스트 구조 감지: 첫 번째 요소를 데이터로 사용합니다.")
+            raw_data = raw_data[0]
+
         # 좌표 정보 로드
         if "node_info" in raw_data:
             for node in raw_data["node_info"]:
+                # lat, lon 정보를 NODE_INFO 딕셔너리에 저장
                 NODE_INFO[node["name"]] = {"lat": node["lat"], "lon": node["lon"]}
-        print(f"✅ 좌표 데이터 로드 완료: {len(NODE_INFO)}개 지점")
+            print(f"📍 좌표 정보 로드 완료: {len(NODE_INFO)}개 지점")
+        else:
+            print("⚠️ 경고: 'node_info' 키를 찾을 수 없습니다. 좌표가 0,0으로 나올 수 있습니다.")
+
+        # 매트릭스 정보 로드
+        if "matrix" in raw_data:
+            MATRIX_DATA = raw_data["matrix"]
+            print(f"📊 거리 매트릭스 로드 완료: {len(MATRIX_DATA)}개 출발지")
+        else:
+            MATRIX_DATA = raw_data # 구조가 다를 경우 통째로 사용 시도
 
 load_data()
 
 def get_driving_time(start_name, end_name):
     key = f"{start_name}->{end_name}"
     if key in DIST_CACHE: return DIST_CACHE[key]
-    if start_name not in NODE_INFO or end_name not in NODE_INFO: return 20
+    
+    # 좌표 정보 없으면 기본 20분
+    if start_name not in NODE_INFO or end_name not in NODE_INFO: 
+        return 20 
     
     start = NODE_INFO[start_name]
     goal = NODE_INFO[end_name]
     
     if NAVER_ID and NAVER_SECRET:
         try:
-            url = "https://maps.apigw.ntruss.com/map-direction/v1/driving"
+            url = "https://naveropenapi.apigw.ntruss.com/map-direction/v1/driving"
             headers = {
                 "x-ncp-apigw-api-key-id": NAVER_ID,
                 "x-ncp-apigw-api-key": NAVER_SECRET
@@ -129,6 +156,7 @@ def get_driving_time(start_name, end_name):
                     return minutes
         except: pass
 
+    # 하버사인 공식 (백업용)
     R = 6371
     dLat = math.radians(goal['lat'] - start['lat'])
     dLon = math.radians(goal['lon'] - start['lon'])
@@ -138,7 +166,7 @@ def get_driving_time(start_name, end_name):
     return max(5, int((dist_km / 40) * 60 * 1.3))
 
 # ==========================================
-# 4. 배차 알고리즘 (다회전 VRP)
+# 4. 배차 알고리즘
 # ==========================================
 
 def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
@@ -251,10 +279,12 @@ def run_ortools(orders, vehicles, start_times, fuel_type):
             while not routing.IsEnd(index):
                 node_idx = manager.IndexToNode(index)
                 if node_idx > 0: fulfilled_indices.add(node_idx - 1)
+                
                 t_val = solution.Min(time_dim.CumulVar(index))
                 
-                # 좌표 정보 추가 (HTML 지도 그리기용)
+                # 좌표 추가 (지도 그리기용)
                 node_name = locs[node_idx]
+                # NODE_INFO에서 좌표를 찾습니다. 없으면 0,0
                 coord = NODE_INFO.get(node_name, {"lat": 0, "lon": 0})
                 
                 path.append({
@@ -269,13 +299,15 @@ def run_ortools(orders, vehicles, start_times, fuel_type):
             
             node_idx = manager.IndexToNode(index)
             end_time = solution.Min(time_dim.CumulVar(index))
-            coord = NODE_INFO.get(depot, {"lat": 0, "lon": 0})
+            
+            # 마지막 센터 좌표
+            depot_coord = NODE_INFO.get(depot, {"lat": 0, "lon": 0})
             
             path.append({
                 "location": depot,
-                "lat": coord["lat"],
-                "lon": coord["lon"],
-                "time": end_time, 
+                "lat": depot_coord["lat"],
+                "lon": depot_coord["lon"],
+                "time": end_time,
                 "load": 0
             })
             
@@ -298,4 +330,4 @@ def optimize(req: OptimizationRequest):
 
 @app.get("/")
 def health():
-    return {"status": "ok", "naver_enabled": bool(NAVER_ID)}
+    return {"status": "ok", "naver_enabled": bool(NAVER_ID), "nodes": len(NODE_INFO)}
