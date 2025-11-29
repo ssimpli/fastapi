@@ -93,18 +93,28 @@ def load_data():
     global NODE_INFO
     raw_data = None
     url = os.environ.get("JEJU_MATRIX_URL")
+    
+    # 1. URL 다운로드 시도
     if url:
         try:
+            print(f"🌐 URL 데이터 다운로드 시도...")
             res = requests.get(url, timeout=15)
-            if res.status_code == 200: raw_data = res.json()
-            else: print(f"❌ URL 로드 실패: {res.status_code}")
+            if res.status_code == 200: 
+                raw_data = res.json()
+                print("✅ URL에서 매트릭스 데이터 로드 성공!")
+            else: 
+                print(f"❌ URL 로드 실패: {res.status_code}")
         except Exception as e:
             print(f"❌ URL 에러: {e}")
+    else:
+        print("ℹ️ [정보] JEJU_MATRIX_URL 환경변수가 없습니다.")
     
+    # 2. 파일 로드 (URL 실패 시 백업)
     if not raw_data and os.path.exists("jeju_distance_matrix_full.json"):
         try:
             with open("jeju_distance_matrix_full.json", "r", encoding="utf-8") as f:
                 raw_data = json.load(f)
+            print("📂 로컬 파일(jeju_distance_matrix_full.json)에서 데이터 로드 성공!")
         except: pass
 
     if raw_data:
@@ -113,7 +123,7 @@ def load_data():
         if "node_info" in raw_data:
             for node in raw_data["node_info"]:
                 NODE_INFO[node["name"]] = {"lat": node["lat"], "lon": node["lon"]}
-        print(f"✅ 좌표 데이터 로드 완료: {len(NODE_INFO)}개 지점")
+        print(f"✅ 좌표 데이터 준비 완료: {len(NODE_INFO)}개 지점")
 
 load_data()
 
@@ -122,6 +132,7 @@ def get_driving_time(start_name, end_name):
     key = f"{start_name}->{end_name}"
     if key in DIST_CACHE: return DIST_CACHE[key]
     if start_name not in NODE_INFO or end_name not in NODE_INFO: 
+        # 좌표가 없으면 기본값 반환
         return 20
     
     start = NODE_INFO[start_name]
@@ -129,8 +140,8 @@ def get_driving_time(start_name, end_name):
     
     if NAVER_ID and NAVER_SECRET:
         try:
-            # 요청하신 URL로 변경
-            url = "https://maps.apigw.ntruss.com/map-direction/v1/driving"
+            url = "https://naveropenapi.apigw.ntruss.com/map-direction/v1/driving"
+            # 네이버 표준 헤더 (대문자) 사용
             headers = {
                 "X-NCP-APIGW-API-KEY-ID": NAVER_ID,
                 "X-NCP-APIGW-API-KEY": NAVER_SECRET
@@ -147,6 +158,8 @@ def get_driving_time(start_name, end_name):
                     minutes = int(json_res["route"]["trafast"][0]["summary"]["duration"] / 60000)
                     DIST_CACHE[key] = minutes
                     return minutes
+            # API 호출 실패 시 로그 (너무 많으면 생략 가능)
+            # else: print(f"⚠️ API Fail ({start_name}->{end_name}): {res.status_code}")
         except: pass
 
     # 하버사인 백업
@@ -158,7 +171,7 @@ def get_driving_time(start_name, end_name):
     dist_km = R * c
     return max(5, int((dist_km / 40) * 60 * 1.3))
 
-# 상세 경로 좌표 가져오기
+# ★ 상세 경로 좌표 가져오기 (로그 추가됨)
 def get_detailed_path_geometry(start_name, end_name):
     key = f"{start_name}->{end_name}"
     if key in PATH_CACHE: return PATH_CACHE[key]
@@ -175,8 +188,7 @@ def get_detailed_path_geometry(start_name, end_name):
         return []
 
     try:
-        # 요청하신 URL로 변경
-        url = "https://maps.apigw.ntruss.com/map-direction/v1/driving"
+        url = "https://naveropenapi.apigw.ntruss.com/map-direction/v1/driving"
         headers = {
             "X-NCP-APIGW-API-KEY-ID": NAVER_ID,
             "X-NCP-APIGW-API-KEY": NAVER_SECRET
@@ -248,13 +260,11 @@ def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
             
         pending_orders = remaining
 
-    skipped_list = [{"name": o.주유소명, "reason": "시간/차량 부족"} for o in pending_orders]
-
     return {
         "status": "success", 
         "total_delivered": sum(r['total_load'] for r in final_schedule),
         "routes": final_schedule, 
-        "unassigned_orders": skipped_list,
+        "unassigned_orders": [{"name": o.주유소명} for o in pending_orders],
         "debug_logs": debug_logs
     }
 
