@@ -21,6 +21,7 @@ DRIVER_START_TIME = 360
 LOADING_TIME = 30      
 UNLOADING_TIME = 30    
 
+# 환경변수 읽기
 NAVER_ID = os.environ.get("NAVER_CLIENT_ID")
 NAVER_SECRET = os.environ.get("NAVER_CLIENT_SECRET")
 
@@ -72,8 +73,8 @@ class OptimizationRequest(BaseModel):
 # 3. 데이터 로드 & 네이버 API 함수
 # ==========================================
 NODE_INFO = {}
-DIST_CACHE = {} # 시간/거리 캐시
-PATH_CACHE = {} # 상세 경로 좌표 캐시
+DIST_CACHE = {}
+PATH_CACHE = {}
 
 def load_data():
     global NODE_INFO
@@ -83,7 +84,9 @@ def load_data():
         try:
             res = requests.get(url, timeout=15)
             if res.status_code == 200: raw_data = res.json()
-        except: pass
+            else: print(f"❌ URL 로드 실패: {res.status_code}")
+        except Exception as e:
+            print(f"❌ URL 에러: {e}")
     
     if not raw_data and os.path.exists("jeju_distance_matrix_full.json"):
         try:
@@ -97,15 +100,17 @@ def load_data():
         if "node_info" in raw_data:
             for node in raw_data["node_info"]:
                 NODE_INFO[node["name"]] = {"lat": node["lat"], "lon": node["lon"]}
-        print(f"✅ 데이터 로드 완료: {len(NODE_INFO)}개 지점")
+        print(f"✅ 좌표 데이터 로드 완료: {len(NODE_INFO)}개 지점")
 
 load_data()
 
-# 운행 시간 계산 (매트릭스 구성용)
+# 거리/시간 계산 (매트릭스용)
 def get_driving_time(start_name, end_name):
     key = f"{start_name}->{end_name}"
     if key in DIST_CACHE: return DIST_CACHE[key]
-    if start_name not in NODE_INFO or end_name not in NODE_INFO: return 20
+    if start_name not in NODE_INFO or end_name not in NODE_INFO: 
+        # 좌표가 없으면 기본값 반환
+        return 20
     
     start = NODE_INFO[start_name]
     goal = NODE_INFO[end_name]
@@ -113,9 +118,10 @@ def get_driving_time(start_name, end_name):
     if NAVER_ID and NAVER_SECRET:
         try:
             url = "https://maps.apigw.ntruss.com/map-direction/v1/driving"
+            # 네이버 표준 헤더 (대문자) 사용
             headers = {
-                "x-ncp-apigw-api-key-id": NAVER_ID,
-                "x-ncp-apigw-api-key": NAVER_SECRET
+                "X-NCP-APIGW-API-KEY-ID": NAVER_ID,
+                "X-NCP-APIGW-API-KEY": NAVER_SECRET
             }
             params = {
                 "start": f"{start['lon']},{start['lat']}",
@@ -129,9 +135,11 @@ def get_driving_time(start_name, end_name):
                     minutes = int(json_res["route"]["trafast"][0]["summary"]["duration"] / 60000)
                     DIST_CACHE[key] = minutes
                     return minutes
+            # API 호출 실패 시 로그 (너무 많으면 생략 가능)
+            # else: print(f"⚠️ API Fail ({start_name}->{end_name}): {res.status_code}")
         except: pass
 
-    # 하버사인 (백업)
+    # 하버사인 백업
     R = 6371
     dLat = math.radians(goal['lat'] - start['lat'])
     dLon = math.radians(goal['lon'] - start['lon'])
@@ -140,38 +148,50 @@ def get_driving_time(start_name, end_name):
     dist_km = R * c
     return max(5, int((dist_km / 40) * 60 * 1.3))
 
-# ★ 추가된 함수: 상세 경로 좌표 가져오기 (결과 생성용)
+# ★ 상세 경로 좌표 가져오기 (로그 추가됨)
 def get_detailed_path_geometry(start_name, end_name):
     key = f"{start_name}->{end_name}"
     if key in PATH_CACHE: return PATH_CACHE[key]
-    if start_name not in NODE_INFO or end_name not in NODE_INFO: return []
+    
+    if start_name not in NODE_INFO or end_name not in NODE_INFO:
+        print(f"⚠️ 좌표 누락: {start_name} 또는 {end_name}")
+        return []
 
     start = NODE_INFO[start_name]
     goal = NODE_INFO[end_name]
 
-    if NAVER_ID and NAVER_SECRET:
-        try:
-            url = "https://naveropenapi.apigw.ntruss.com/map-direction/v1/driving"
-            headers = {
-                "x-ncp-apigw-api-key-id": NAVER_ID,
-                "x-ncp-apigw-api-key": NAVER_SECRET
-            }
-            params = {
-                "start": f"{start['lon']},{start['lat']}",
-                "goal": f"{goal['lon']},{goal['lat']}",
-                "option": "trafast"
-            }
-            res = requests.get(url, headers=headers, params=params)
-            if res.status_code == 200:
-                json_res = res.json()
-                if json_res["code"] == 0:
-                    # 네이버는 [[lon, lat], [lon, lat]...] 형태로 줌
-                    path_data = json_res["route"]["trafast"][0]["path"]
-                    PATH_CACHE[key] = path_data
-                    return path_data
-        except: pass
+    if not NAVER_ID or not NAVER_SECRET:
+        print("⚠️ 네이버 API 키가 설정되지 않았습니다.")
+        return []
+
+    try:
+        url = "https://naveropenapi.apigw.ntruss.com/map-direction/v1/driving"
+        headers = {
+            "X-NCP-APIGW-API-KEY-ID": NAVER_ID,
+            "X-NCP-APIGW-API-KEY": NAVER_SECRET
+        }
+        params = {
+            "start": f"{start['lon']},{start['lat']}",
+            "goal": f"{goal['lon']},{goal['lat']}",
+            "option": "trafast"
+        }
+        res = requests.get(url, headers=headers, params=params)
+        
+        if res.status_code == 200:
+            json_res = res.json()
+            if json_res["code"] == 0:
+                path_data = json_res["route"]["trafast"][0]["path"]
+                PATH_CACHE[key] = path_data
+                return path_data
+            else:
+                print(f"⚠️ API 응답 코드 오류: {json_res['code']} ({json_res.get('message')})")
+        else:
+            print(f"⚠️ API HTTP 오류: {res.status_code} - {res.text}")
+            
+    except Exception as e:
+        print(f"❌ API 호출 중 예외 발생: {e}")
     
-    return [] # 실패 시 빈 리스트
+    return []
 
 # ==========================================
 # 4. 배차 알고리즘
@@ -310,7 +330,6 @@ def run_ortools(orders, vehicles, start_times, fuel_type):
             end_time = solution.Min(time_dim.CumulVar(index))
             depot_coord = NODE_INFO.get(depot, {"lat": 0, "lon": 0})
             
-            # 마지막 지점 -> 센터 복귀 경로
             last_loc = path[-1]["location"]
             return_path = get_detailed_path_geometry(last_loc, depot)
             if return_path: geometry_list.extend(return_path)
@@ -327,7 +346,7 @@ def run_ortools(orders, vehicles, start_times, fuel_type):
                     "end_time": end_time, 
                     "total_load": load, 
                     "path": path,
-                    "geometry": geometry_list # 상세 경로 좌표 포함!
+                    "geometry": geometry_list # 상세 경로
                 })
                 
     remaining = [orders[i] for i in range(len(orders)) if i not in fulfilled_indices]
