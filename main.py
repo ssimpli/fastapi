@@ -21,6 +21,9 @@ DRIVER_START_TIME = 360
 LOADING_TIME = 20      
 UNLOADING_TIME = 30    
 
+# [디버깅용] 현재 로드된 환경변수 키 목록 출력 (값은 보안상 출력 안함)
+print("🔍 현재 서버 환경변수 목록:", list(os.environ.keys()))
+
 # 환경변수 읽기 (유연한 처리)
 NAVER_ID = os.environ.get("NAVER_CLIENT_ID") or os.environ.get("x-ncp-apigw-api-key-id")
 NAVER_SECRET = os.environ.get("NAVER_CLIENT_SECRET") or os.environ.get("x-ncp-apigw-api-key")
@@ -28,9 +31,12 @@ NAVER_SECRET = os.environ.get("NAVER_CLIENT_SECRET") or os.environ.get("x-ncp-ap
 # 시작 시 로그 출력
 if not NAVER_ID or not NAVER_SECRET:
     print("⚠️ [경고] 네이버 지도 API 키가 설정되지 않았습니다.")
-    print("   Railway > Variables 탭에서 'NAVER_CLIENT_ID'와 'NAVER_CLIENT_SECRET'을 추가해주세요.")
+    print("   - 확인된 변수명: NAVER_CLIENT_ID, NAVER_CLIENT_SECRET")
+    print("   - Railway > Variables 탭에 해당 변수가 있는지 확인하시고, 'Redeploy'를 눌러주세요.")
 else:
-    print(f"✅ 네이버 지도 API 키 로드 성공 (ID 길이: {len(NAVER_ID)})")
+    # 보안을 위해 ID의 앞 2글자만 노출하여 확인
+    masked_id = NAVER_ID[:2] + "*" * 5 if NAVER_ID else "None"
+    print(f"✅ 네이버 지도 API 키 로드 성공 (ID: {masked_id}, 길이: {len(NAVER_ID)})")
 
 # ==========================================
 # 2. 데이터 모델
