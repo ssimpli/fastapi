@@ -18,12 +18,19 @@ app = FastAPI()
 # 1. 설정 및 환경변수
 # ==========================================
 DRIVER_START_TIME = 360 
-LOADING_TIME = 30      
+LOADING_TIME = 20      
 UNLOADING_TIME = 30    
 
-# 환경변수 읽기
-NAVER_ID = os.environ.get("NAVER_CLIENT_ID")
-NAVER_SECRET = os.environ.get("NAVER_CLIENT_SECRET")
+# 환경변수 읽기 (유연한 처리)
+NAVER_ID = os.environ.get("NAVER_CLIENT_ID") or os.environ.get("x-ncp-apigw-api-key-id")
+NAVER_SECRET = os.environ.get("NAVER_CLIENT_SECRET") or os.environ.get("x-ncp-apigw-api-key")
+
+# 시작 시 로그 출력
+if not NAVER_ID or not NAVER_SECRET:
+    print("⚠️ [경고] 네이버 지도 API 키가 설정되지 않았습니다.")
+    print("   Railway > Variables 탭에서 'NAVER_CLIENT_ID'와 'NAVER_CLIENT_SECRET'을 추가해주세요.")
+else:
+    print(f"✅ 네이버 지도 API 키 로드 성공 (ID 길이: {len(NAVER_ID)})")
 
 # ==========================================
 # 2. 데이터 모델
@@ -109,7 +116,6 @@ def get_driving_time(start_name, end_name):
     key = f"{start_name}->{end_name}"
     if key in DIST_CACHE: return DIST_CACHE[key]
     if start_name not in NODE_INFO or end_name not in NODE_INFO: 
-        # 좌표가 없으면 기본값 반환
         return 20
     
     start = NODE_INFO[start_name]
@@ -117,8 +123,8 @@ def get_driving_time(start_name, end_name):
     
     if NAVER_ID and NAVER_SECRET:
         try:
+            # 요청하신 URL로 변경
             url = "https://maps.apigw.ntruss.com/map-direction/v1/driving"
-            # 네이버 표준 헤더 (대문자) 사용
             headers = {
                 "X-NCP-APIGW-API-KEY-ID": NAVER_ID,
                 "X-NCP-APIGW-API-KEY": NAVER_SECRET
@@ -135,8 +141,6 @@ def get_driving_time(start_name, end_name):
                     minutes = int(json_res["route"]["trafast"][0]["summary"]["duration"] / 60000)
                     DIST_CACHE[key] = minutes
                     return minutes
-            # API 호출 실패 시 로그 (너무 많으면 생략 가능)
-            # else: print(f"⚠️ API Fail ({start_name}->{end_name}): {res.status_code}")
         except: pass
 
     # 하버사인 백업
@@ -148,7 +152,7 @@ def get_driving_time(start_name, end_name):
     dist_km = R * c
     return max(5, int((dist_km / 40) * 60 * 1.3))
 
-# ★ 상세 경로 좌표 가져오기 (로그 추가됨)
+# 상세 경로 좌표 가져오기
 def get_detailed_path_geometry(start_name, end_name):
     key = f"{start_name}->{end_name}"
     if key in PATH_CACHE: return PATH_CACHE[key]
@@ -161,11 +165,12 @@ def get_detailed_path_geometry(start_name, end_name):
     goal = NODE_INFO[end_name]
 
     if not NAVER_ID or not NAVER_SECRET:
-        print("⚠️ 네이버 API 키가 설정되지 않았습니다.")
+        print("⚠️ 네이버 API 키 설정 안됨: 상세 경로를 그릴 수 없습니다.")
         return []
 
     try:
-        url = "https://naveropenapi.apigw.ntruss.com/map-direction/v1/driving"
+        # 요청하신 URL로 변경
+        url = "https://maps.apigw.ntruss.com/map-direction/v1/driving"
         headers = {
             "X-NCP-APIGW-API-KEY-ID": NAVER_ID,
             "X-NCP-APIGW-API-KEY": NAVER_SECRET
@@ -237,11 +242,13 @@ def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
             
         pending_orders = remaining
 
+    skipped_list = [{"name": o.주유소명, "reason": "시간/차량 부족"} for o in pending_orders]
+
     return {
         "status": "success", 
         "total_delivered": sum(r['total_load'] for r in final_schedule),
         "routes": final_schedule, 
-        "unassigned_orders": [{"name": o.주유소명} for o in pending_orders],
+        "unassigned_orders": skipped_list,
         "debug_logs": debug_logs
     }
 
@@ -298,7 +305,7 @@ def run_ortools(orders, vehicles, start_times, fuel_type):
             index = routing.Start(v_idx)
             path = []
             load = 0
-            geometry_list = [] # 상세 경로 좌표 모음
+            geometry_list = []
 
             while not routing.IsEnd(index):
                 node_idx = manager.IndexToNode(index)
@@ -315,17 +322,14 @@ def run_ortools(orders, vehicles, start_times, fuel_type):
                 })
                 load += demands[node_idx]
 
-                # 다음 지점
                 next_index = solution.Value(routing.NextVar(index))
                 if not routing.IsEnd(next_index):
                     next_node_idx = manager.IndexToNode(next_index)
-                    # 현재->다음 상세 경로 가져오기 (API 호출)
                     segment_path = get_detailed_path_geometry(node_name, locs[next_node_idx])
                     if segment_path: geometry_list.extend(segment_path)
                 
                 index = next_index
 
-            # 복귀
             node_idx = manager.IndexToNode(index)
             end_time = solution.Min(time_dim.CumulVar(index))
             depot_coord = NODE_INFO.get(depot, {"lat": 0, "lon": 0})
@@ -346,7 +350,7 @@ def run_ortools(orders, vehicles, start_times, fuel_type):
                     "end_time": end_time, 
                     "total_load": load, 
                     "path": path,
-                    "geometry": geometry_list # 상세 경로
+                    "geometry": geometry_list
                 })
                 
     remaining = [orders[i] for i in range(len(orders)) if i not in fulfilled_indices]
