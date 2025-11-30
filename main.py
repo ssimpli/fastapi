@@ -287,29 +287,4 @@ def optimize(req: OptimizationRequest):
 @app.get("/")
 def health():
     return {"status": "ok"}
-```
 
----
-
-### 2단계: n8n 워크플로우 구성 (Sub-workflow 활용)
-
-제안하신 Sub-workflow 아이디어를 그대로 살려서, n8n에서 상세 경로를 완성하는 로직입니다.
-
-**구조:**
-1.  **FastAPI 결과 받음** (경로는 있지만 `geometry`는 비어있음)
-2.  **Code Node:** 경로(`path`)를 순회하며 `출발지 좌표 -> 도착지 좌표` 쌍을 만듭니다.
-3.  **Loop:** 각 쌍에 대해 Sub-workflow (또는 HTTP Request)를 호출해 네이버에서 `path` 배열을 받아옵니다.
-4.  **Merge:** 받아온 `path`들을 합쳐서 최종 HTML 지도 생성 데이터로 넘깁니다.
-
-이 부분은 n8n에서 **`9. 지도 생성` 노드 바로 앞**에 끼워 넣어야 합니다.
-(단, n8n 클라우드 버전을 쓰고 계시다면 API 호출 횟수가 많아질 수 있으니 주의하세요. 자체 호스팅이면 상관없습니다.)
-
-**핵심:** 선생님이 이미 만드신 Sub-workflow가 `path`(경로 좌표 배열)를 리턴하도록 조금만 손보시면 됩니다. 현재는 `duration`, `distance`만 리턴하고 있거든요.
-Sub-workflow의 `Edit Fields` 노드에 다음을 추가하세요:
-
-```javascript
-{
-  "name": "path_geometry",
-  "value": "={{ $json.route.trafast[0].path }}", // trafast 옵션 사용 시
-  "type": "array"
-}
