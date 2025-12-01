@@ -309,7 +309,7 @@ def run_ortools(orders, vehicles, start_times, fuel_type):
         time_dim.CumulVar(idx).SetMin(int(start_times[i]))
 
     time_dim.CumulVar(routing.Start(0)).SetRange(0, 1440)
-// 수정
+    
     for i, order in enumerate(orders):
         index = manager.NodeToIndex(i + 1)
         time_dim.CumulVar(index).SetRange(order.start_min, order.end_min)
