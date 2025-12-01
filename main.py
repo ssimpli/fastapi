@@ -18,7 +18,7 @@ app = FastAPI()
 # 1. 설정 및 환경변수
 # ==========================================
 DRIVER_START_TIME = 360 
-LOADING_TIME = 20      
+LOADING_TIME = 30      
 UNLOADING_TIME = 30    
 
 # [디버깅용] 현재 로드된 환경변수 키 목록 출력 (값은 보안상 출력 안함)
@@ -239,12 +239,16 @@ def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
         return {"status": "skipped", "routes": [], "debug_logs": debug_logs}
 
     vehicle_state = {i: DRIVER_START_TIME for i in range(len(my_vehicles))} 
+    vehicle_workload = {i: 0 for i in range(len(my_vehicles))}  # 🔹추가: 누적 수송량
     final_schedule = []
     
     for round_num in range(1, 6):
         if not pending_orders: break
         available_indices = [i for i, t in vehicle_state.items() if t < 1080 - 60]
         if not available_indices: break
+
+        # 🔹 지금까지 누적 작업량이 적은 차량부터 우선 사용
+        available_indices.sort(key=lambda i: vehicle_workload[i])
         
         current_vehicles = [my_vehicles[i] for i in available_indices]
         current_starts = [vehicle_state[i] for i in available_indices]
@@ -256,7 +260,10 @@ def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
 
         for r in routes:
             real_v_idx = available_indices[r['internal_idx']]
+            
             vehicle_state[real_v_idx] = r['end_time'] + LOADING_TIME
+            vehicle_workload[real_v_idx] += r["total_load"]       # 🔹이 차량 누적 수송량 증가
+            
             r['round'] = round_num
             r['vehicle_id'] = my_vehicles[real_v_idx].차량번호
             final_schedule.append(r)
@@ -297,19 +304,25 @@ def run_ortools(orders, vehicles, start_times, fuel_type):
     routing.AddDimension(transit_idx, 1440, 1440, False, "Time")
     time_dim = routing.GetDimensionOrDie("Time")
     
-    # ✨ 추가된 줄: 전체 경로 길이를 줄이도록 유도해 차량 간 불균형 완화
-    time_dim.SetGlobalSpanCostCoefficient(100)
-
     for i in range(len(vehicles)):
         idx = routing.Start(i)
         time_dim.CumulVar(idx).SetMin(int(start_times[i]))
 
     time_dim.CumulVar(routing.Start(0)).SetRange(0, 1440)
+// 수정
     for i, order in enumerate(orders):
         index = manager.NodeToIndex(i + 1)
         time_dim.CumulVar(index).SetRange(order.start_min, order.end_min)
-        penalty = 100000 if order.priority == 1 else 1000
-        routing.AddDisjunction([index], penalty)
+    
+        if order.priority == 1:
+            # 🔹 필수 방문: Disjunction 안 걸어줌
+            # (솔버가 이 노드를 빼버릴 수 없음)
+            pass
+        else:
+            # 🔹 상대적으로 덜 중요한 주문만 선택적으로 방문
+            penalty = 1_000_000  # 꽤 크게
+            routing.AddDisjunction([index], penalty)
+
 
     demands = [0] + [ (o.휘발유 if fuel_type=="휘발유" else o.등유+o.경유) for o in orders ]
     def demand_callback(from_i):
