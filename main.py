@@ -301,11 +301,15 @@ def run_ortools(orders, vehicles, start_times, fuel_type):
 
     transit_idx = routing.RegisterTransitCallback(time_callback)
     routing.SetArcCostEvaluatorOfAllVehicles(transit_idx)
+
     routing.AddDimension(transit_idx, 1440, 1440, False, "Time")
     time_dim = routing.GetDimensionOrDie("Time")
+    
+    if hasattr(time_dim, "SetSlackCostCoefficientForAllVehicles"):
+        time_dim.SetSlackCostCoefficientForAllVehicles(1)
+    else:
+        print("⚠️ SetSlackCostCoefficientForAllVehicles 지원 안 하는 OR-Tools 버전입니다.")
 
-    # 🔹 추가: 대기시간(슬랙)에 비용 부여 → 괜히 일찍 가서 오래 기다리는 해를 싫어하게 됨, 숫자 1을 2,3,4,5 로 피팅가능
-    time_dim.SetSlackCostCoefficientForAllVehicles(1)
     
     for i in range(len(vehicles)):
         idx = routing.Start(i)
