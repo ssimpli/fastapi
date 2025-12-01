@@ -297,6 +297,9 @@ def run_ortools(orders, vehicles, start_times, fuel_type):
     routing.AddDimension(transit_idx, 1440, 1440, False, "Time")
     time_dim = routing.GetDimensionOrDie("Time")
     
+    # ✨ 추가된 줄: 전체 경로 길이를 줄이도록 유도해 차량 간 불균형 완화
+    time_dim.SetGlobalSpanCostCoefficient(100)
+
     for i in range(len(vehicles)):
         idx = routing.Start(i)
         time_dim.CumulVar(idx).SetMin(int(start_times[i]))
