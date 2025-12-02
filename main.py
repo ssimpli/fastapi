@@ -41,6 +41,7 @@ else:
 # ==========================================
 class OrderItem(BaseModel):
     주유소명: str
+    브랜드: str = ""  # "SK" 또는 "알뜰"
     휘발유: int = 0
     등유: int = 0
     경유: int = 0
@@ -240,6 +241,14 @@ def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
     if not pending_orders or not my_vehicles:
         return {"status": "skipped", "routes": [], "debug_logs": debug_logs}
 
+    # 🔹 휘발유인 경우 제주96바7408 차량 찾기 (알뜰 주유소 전용)
+    preferred_vehicle_idx = None
+    if fuel_type == "휘발유":
+        for i, v in enumerate(my_vehicles):
+            if v.차량번호 == "제주96바7408":
+                preferred_vehicle_idx = i
+                break
+
     vehicle_state = {i: DRIVER_START_TIME for i in range(len(my_vehicles))} 
     vehicle_workload = {i: 0 for i in range(len(my_vehicles))}  # 🔹추가: 누적 수송량
     final_schedule = []
@@ -249,15 +258,54 @@ def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
         available_indices = [i for i, t in vehicle_state.items() if t < WAREHOUSE_CLOSE_TIME]
         if not available_indices: break
 
+        # 🔹 휘발유이고 알뜰 주유소 주문이 있는 경우, 제주96바7408 우선 사용
+        if fuel_type == "휘발유" and preferred_vehicle_idx is not None and preferred_vehicle_idx in available_indices:
+            # 알뜰 주유소 주문 분리
+            altteul_orders = [o for o in pending_orders if getattr(o, '브랜드', '') == '알뜰']
+            sk_orders = [o for o in pending_orders if getattr(o, '브랜드', '') != '알뜰']
+            
+            if altteul_orders:
+                # 1단계: 알뜰 주유소 주문에 대해 제주96바7408만 사용
+                preferred_vehicle = [my_vehicles[preferred_vehicle_idx]]
+                preferred_start = [vehicle_state[preferred_vehicle_idx]]
+                
+                routes_preferred, remaining_altteul = run_ortools(
+                    altteul_orders, preferred_vehicle, preferred_start, fuel_type, preferred_vehicle_idx=0
+                )
+                
+                # 제주96바7408로 처리된 경우 상태 업데이트
+                if routes_preferred:
+                    for r in routes_preferred:
+                        vehicle_state[preferred_vehicle_idx] = r['end_time'] + LOADING_TIME
+                        vehicle_workload[preferred_vehicle_idx] += r["total_load"]
+                        r['round'] = round_num
+                        r['vehicle_id'] = my_vehicles[preferred_vehicle_idx].차량번호
+                        final_schedule.append(r)
+                    
+                    # 남은 알뜰 주문과 SK 주문을 합쳐서 모든 차량으로 처리
+                    remaining_orders = remaining_altteul + sk_orders
+                else:
+                    # 제주96바7408로 처리 못한 경우, 모든 알뜰 주문과 SK 주문을 합쳐서 처리
+                    remaining_orders = altteul_orders + sk_orders
+            else:
+                # 알뜰 주유소 주문이 없으면 기존 로직대로
+                remaining_orders = pending_orders
+        else:
+            # 등경유이거나 제주96바7408이 사용 불가능한 경우 기존 로직
+            remaining_orders = pending_orders
+
         # 🔹 지금까지 누적 작업량이 적은 차량부터 우선 사용
+        available_indices = [i for i, t in vehicle_state.items() if t < WAREHOUSE_CLOSE_TIME]
+        if not available_indices: break
         available_indices.sort(key=lambda i: vehicle_workload[i])
         
         current_vehicles = [my_vehicles[i] for i in available_indices]
         current_starts = [vehicle_state[i] for i in available_indices]
         
-        routes, remaining = run_ortools(pending_orders, current_vehicles, current_starts, fuel_type)
+        # 🔹 남은 주문 처리 시에는 제약 없이 모든 차량 사용
+        routes, remaining = run_ortools(remaining_orders, current_vehicles, current_starts, fuel_type, preferred_vehicle_idx=None)
         
-        if not routes and len(remaining) == len(pending_orders):
+        if not routes and len(remaining) == len(remaining_orders):
             break
 
         for r in routes:
@@ -282,7 +330,10 @@ def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
         "debug_logs": debug_logs
     }
 
-def run_ortools(orders, vehicles, start_times, fuel_type):
+def run_ortools(orders, vehicles, start_times, fuel_type, preferred_vehicle_idx=None):
+    """
+    preferred_vehicle_idx: 알뜰 주유소를 처리할 우선 차량 인덱스 (None이면 제약 없음)
+    """
     depot = "제주물류센터"
     locs = [depot] + [o.주유소명 for o in orders]
     N = len(locs)
@@ -295,6 +346,20 @@ def run_ortools(orders, vehicles, start_times, fuel_type):
 
     manager = pywrapcp.RoutingIndexManager(N, len(vehicles), 0)
     routing = pywrapcp.RoutingModel(manager)
+    
+    # 🔹 알뜰 주유소는 preferred_vehicle_idx 차량만 방문하도록 제약
+    # 참고: solve_multitrip_vrp에서 이미 preferred_vehicle 리스트에 제주96바7408만 넣었으므로
+    # vehicles 리스트에 원하는 차량만 들어있어 자동으로 제약이 적용됩니다.
+    # OR-Tools 9.12 이상에서는 SetAllowedVehiclesForIndex 메서드를 사용할 수 있지만,
+    # 현재 구조에서는 vehicles 리스트 필터링만으로도 충분합니다.
+    # 
+    # 만약 추가 제약이 필요한 경우 (예: 여러 차량 중 특정 차량만 선택):
+    # if preferred_vehicle_idx is not None and fuel_type == "휘발유":
+    #     for i, order in enumerate(orders):
+    #         if getattr(order, '브랜드', '') == '알뜰':
+    #             index = manager.NodeToIndex(i + 1)
+    #             # OR-Tools 9.12+ 에서는 SetAllowedVehiclesForIndex 사용 가능
+    #             routing.SetAllowedVehiclesForIndex([preferred_vehicle_idx], index)
 
     def time_callback(from_i, to_i):
         f, t = manager.IndexToNode(from_i), manager.IndexToNode(to_i)
