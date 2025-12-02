@@ -299,10 +299,19 @@ def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
         if not available_indices: break
         available_indices.sort(key=lambda i: vehicle_workload[i])
         
+        # 🔹 휘발유이고 SK 주유소 주문이 포함된 경우, 제주96바7408 제외
+        if fuel_type == "휘발유" and preferred_vehicle_idx is not None:
+            # remaining_orders에 SK 주유소 주문이 있는지 확인
+            has_sk_orders = any(getattr(o, '브랜드', '') != '알뜰' for o in remaining_orders)
+            if has_sk_orders:
+                # SK 주유소 주문이 있으면 제주96바7408 제외
+                available_indices = [i for i in available_indices if i != preferred_vehicle_idx]
+                if not available_indices: break
+        
         current_vehicles = [my_vehicles[i] for i in available_indices]
         current_starts = [vehicle_state[i] for i in available_indices]
         
-        # 🔹 남은 주문 처리 시에는 제약 없이 모든 차량 사용
+        # 🔹 남은 주문 처리 시에는 제약 없이 모든 차량 사용 (단, 제주96바7408은 SK 주유소에 배차 안됨)
         routes, remaining = run_ortools(remaining_orders, current_vehicles, current_starts, fuel_type, preferred_vehicle_idx=None)
         
         if not routes and len(remaining) == len(remaining_orders):
