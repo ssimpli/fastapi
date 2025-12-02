@@ -17,9 +17,11 @@ app = FastAPI()
 # ==========================================
 # 1. 설정 및 환경변수
 # ==========================================
-DRIVER_START_TIME = 360 
-LOADING_TIME = 30      
-UNLOADING_TIME = 30    
+DRIVER_START_TIME = 420  # 7:00 (제주물류센터 운영 시작 시간)
+LOADING_TIME = 30        # 적재 시간 30분
+WAREHOUSE_CLOSE_TIME = 1020  # 17:00 (오후 5:00, 물류센터 마감 시간 - 유조차 도착 마감)
+GASOLINE_UNLOADING_TIME = 40  # 휘발유 하역 시간
+DIESEL_UNLOADING_TIME = 30     # 등경유 하역 시간    
 
 # [디버깅용] 현재 로드된 환경변수 키 목록 출력 (값은 보안상 출력 안함)
 print("🔍 현재 서버 환경변수 목록:", list(os.environ.keys()))
@@ -244,7 +246,7 @@ def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
     
     for round_num in range(1, 6):
         if not pending_orders: break
-        available_indices = [i for i, t in vehicle_state.items() if t < 1080 - 60]
+        available_indices = [i for i, t in vehicle_state.items() if t < WAREHOUSE_CLOSE_TIME]
         if not available_indices: break
 
         # 🔹 지금까지 누적 작업량이 적은 차량부터 우선 사용
@@ -296,7 +298,11 @@ def run_ortools(orders, vehicles, start_times, fuel_type):
 
     def time_callback(from_i, to_i):
         f, t = manager.IndexToNode(from_i), manager.IndexToNode(to_i)
-        service = UNLOADING_TIME if t != 0 else 0
+        if t != 0:
+            # 유종에 따라 하역 시간 다르게 적용
+            service = GASOLINE_UNLOADING_TIME if fuel_type == "휘발유" else DIESEL_UNLOADING_TIME
+        else:
+            service = 0
         return durations[f][t] + service
 
     transit_idx = routing.RegisterTransitCallback(time_callback)
