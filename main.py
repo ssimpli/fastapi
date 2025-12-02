@@ -417,7 +417,12 @@ def run_ortools(orders, vehicles, start_times, fuel_type, preferred_vehicle_idx=
     
     for i in range(len(vehicles)):
         idx = routing.Start(i)
-        time_dim.CumulVar(idx).SetMin(int(start_times[i]))
+        start_time = int(start_times[i])
+        # 🔹 차량이 가능한 한 빨리 시작하도록 제약 설정
+        time_dim.CumulVar(idx).SetMin(start_time)
+        # 🔹 최대값도 설정하여 차량이 가능한 한 빨리 시작하도록 강제
+        # (약간의 여유를 두되, 가능한 한 빨리 시작)
+        time_dim.CumulVar(idx).SetMax(start_time + 30)  # 최대 30분 여유만 허용
 
     time_dim.CumulVar(routing.Start(0)).SetRange(0, 1440)
     
@@ -443,7 +448,9 @@ def run_ortools(orders, vehicles, start_times, fuel_type, preferred_vehicle_idx=
 
     search_params = pywrapcp.DefaultRoutingSearchParameters()
     search_params.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
-    search_params.time_limit.seconds = 5
+    search_params.time_limit.seconds = 10  # 🔹 최적화 시간을 늘려서 더 나은 해를 찾도록
+    # 🔹 차량이 가능한 한 빨리 시작하도록 최적화
+    search_params.local_search_metaheuristic = routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
     solution = routing.SolveWithParameters(search_params)
     
     routes = []
