@@ -329,13 +329,37 @@ def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
             
         pending_orders = remaining
 
-    skipped_list = [{"name": o.주유소명, "reason": "시간/차량 부족"} for o in pending_orders]
+    # 🔹 미처리 주문 상세 정보 생성
+    skipped_list = []
+    for o in pending_orders:
+        order_info = {
+            "주유소명": o.주유소명,
+            "브랜드": getattr(o, '브랜드', ''),
+            "요청물량": {
+                "휘발유": o.휘발유 if fuel_type == "휘발유" else 0,
+                "등유": o.등유 if fuel_type != "휘발유" else 0,
+                "경유": o.경유 if fuel_type != "휘발유" else 0
+            },
+            "총요청물량": o.휘발유 if fuel_type == "휘발유" else (o.등유 + o.경유),
+            "시간제약": {
+                "시작시간": f"{o.start_min // 60:02d}:{o.start_min % 60:02d}",
+                "종료시간": f"{o.end_min // 60:02d}:{o.end_min % 60:02d}",
+                "start_min": o.start_min,
+                "end_min": o.end_min
+            },
+            "우선순위": o.priority,
+            "미처리이유": "시간/차량 부족"
+        }
+        skipped_list.append(order_info)
 
     return {
         "status": "success", 
         "total_delivered": sum(r['total_load'] for r in final_schedule),
+        "total_vehicles_used": len(set(r['vehicle_id'] for r in final_schedule)),
         "routes": final_schedule, 
         "unassigned_orders": skipped_list,
+        "unassigned_count": len(skipped_list),
+        "unassigned_total_load": sum(o["총요청물량"] for o in skipped_list),
         "debug_logs": debug_logs
     }
 
@@ -471,9 +495,14 @@ def run_ortools(orders, vehicles, start_times, fuel_type, preferred_vehicle_idx=
             })
             
             if len(path) > 2:
+                # 시작 시간 계산 (첫 번째 노드의 시간)
+                start_time = solution.Min(time_dim.CumulVar(routing.Start(v_idx))) if len(path) > 0 else 0
                 routes.append({
                     "internal_idx": v_idx, 
-                    "end_time": end_time, 
+                    "start_time": start_time,
+                    "start_time_formatted": f"{start_time // 60:02d}:{start_time % 60:02d}",
+                    "end_time": end_time,
+                    "end_time_formatted": f"{end_time // 60:02d}:{end_time % 60:02d}",
                     "total_load": load, 
                     "path": path,
                     "geometry": geometry_list
