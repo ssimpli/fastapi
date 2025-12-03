@@ -45,8 +45,8 @@ class OrderItem(BaseModel):
     휘발유: int = 0
     등유: int = 0
     경유: int = 0
-    start_min: int = 420
-    end_min: int = 1080
+    start_min: int = 420  # 7:00 (기본 방문 시작 시간)
+    end_min: int = 1435  # 23:55 (기본 방문 종료 시간)
     priority: int = 2
     
     class Config:
