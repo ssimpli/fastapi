@@ -19,7 +19,7 @@ app = FastAPI()
 # ==========================================
 DRIVER_START_TIME = 420  # 7:00 (제주물류센터 운영 시작 시간)
 LOADING_TIME = 30        # 적재 시간 30분
-WAREHOUSE_CLOSE_TIME = 1050  # 17:30 (오후 5:30, 물류센터 마감 시간 - 유조차 도착 마감)
+WAREHOUSE_CLOSE_TIME = 1080  # 18:00 (오후 6:00, 물류센터 마감 시간 - 유조차 도착 마감, 이후 수송은 계속 가능)
 GASOLINE_UNLOADING_TIME = 40  # 휘발유 하역 시간
 DIESEL_UNLOADING_TIME = 30     # 등경유 하역 시간    
 
@@ -421,6 +421,8 @@ def run_ortools(orders, vehicles, start_times, fuel_type, preferred_vehicle_idx=
         # 🔹 모든 차량이 정확히 지정된 시간(7:00)에 시작하도록 제약 설정
         time_dim.CumulVar(idx).SetMin(start_time)
         time_dim.CumulVar(idx).SetMax(start_time)  # 최소값과 최대값을 동일하게 설정하여 정확히 해당 시간에 시작
+        # 참고: 차량이 물류센터에 돌아오는 시간은 제약하지 않음 (18:00 이후에도 수송 가능)
+        # 새로운 배차 시작은 WAREHOUSE_CLOSE_TIME(18:00) 조건으로 제어됨
     
     for i, order in enumerate(orders):
         index = manager.NodeToIndex(i + 1)
