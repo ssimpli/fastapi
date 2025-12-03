@@ -262,13 +262,16 @@ def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
                 preferred_vehicle_idx = i
                 break
 
+    # 🔹 vehicle_state: 차량이 물류센터에 도착한 시간 (적재 시작 가능 시간)
     vehicle_state = {i: DRIVER_START_TIME for i in range(len(my_vehicles))} 
     vehicle_workload = {i: 0 for i in range(len(my_vehicles))}  # 🔹추가: 누적 수송량
     final_schedule = []
     
     for round_num in range(1, 6):
         if not pending_orders: break
-        available_indices = [i for i, t in vehicle_state.items() if t < WAREHOUSE_CLOSE_TIME]
+        # 🔹 차량이 18:00 이전에 물류센터에 도착했는지 확인
+        # 18:00 이전에 도착하면 적재를 시작할 수 있음 (적재는 18:00 이후에도 가능)
+        available_indices = [i for i, arrival_time in vehicle_state.items() if arrival_time < WAREHOUSE_CLOSE_TIME]
         if not available_indices: break
 
         # 🔹 휘발유이고 알뜰 주유소 주문이 있는 경우, 제주96바7408 우선 사용
@@ -284,7 +287,8 @@ def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
             if altteul_orders:
                 # 1단계: 알뜰 주유소 주문에 대해 제주96바7408만 사용
                 preferred_vehicle = [my_vehicles[preferred_vehicle_idx]]
-                preferred_start = [vehicle_state[preferred_vehicle_idx]]
+                # 🔹 차량이 물류센터에 도착한 후 적재를 완료한 시간이 다음 배차 시작 시간
+                preferred_start = [vehicle_state[preferred_vehicle_idx] + LOADING_TIME]
                 
                 routes_preferred, remaining_altteul = run_ortools(
                     altteul_orders, preferred_vehicle, preferred_start, fuel_type, preferred_vehicle_idx=0
@@ -293,7 +297,8 @@ def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
                 # 제주96바7408로 처리된 경우 상태 업데이트
                 if routes_preferred:
                     for r in routes_preferred:
-                        vehicle_state[preferred_vehicle_idx] = r['end_time'] + LOADING_TIME
+                        # 🔹 차량이 물류센터에 도착한 시간으로 저장 (적재 시작 가능 시간)
+                        vehicle_state[preferred_vehicle_idx] = r['end_time']
                         vehicle_workload[preferred_vehicle_idx] += r["total_load"]
                         r['round'] = round_num
                         r['vehicle_id'] = my_vehicles[preferred_vehicle_idx].차량번호
@@ -329,7 +334,9 @@ def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
                 if not available_indices: break
         
         current_vehicles = [my_vehicles[i] for i in available_indices]
-        current_starts = [vehicle_state[i] for i in available_indices]
+        # 🔹 차량이 물류센터에 도착한 후 적재를 완료한 시간이 다음 배차 시작 시간
+        # vehicle_state는 차량이 물류센터에 도착한 시간이므로, 적재 시간을 더함
+        current_starts = [vehicle_state[i] + LOADING_TIME for i in available_indices]
         
         # 🔹 남은 주문 처리 시에는 제약 없이 모든 차량 사용 (단, 제주96바7408은 SK 주유소에 배차 안됨)
         routes, remaining = run_ortools(remaining_orders, current_vehicles, current_starts, fuel_type, preferred_vehicle_idx=None)
@@ -340,7 +347,8 @@ def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
         for r in routes:
             real_v_idx = available_indices[r['internal_idx']]
             
-            vehicle_state[real_v_idx] = r['end_time'] + LOADING_TIME
+            # 🔹 차량이 물류센터에 도착한 시간으로 저장 (적재 시작 가능 시간)
+            vehicle_state[real_v_idx] = r['end_time']
             vehicle_workload[real_v_idx] += r["total_load"]       # 🔹이 차량 누적 수송량 증가
             
             r['round'] = round_num
