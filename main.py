@@ -240,6 +240,19 @@ def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
     
     if not pending_orders or not my_vehicles:
         return {"status": "skipped", "routes": [], "debug_logs": debug_logs}
+    
+    # 🔹 주문을 거리순으로 정렬 (가까운 곳부터 배차하여 빠르게 복귀 가능하도록)
+    # 우선순위: 1) priority=1인 긴급 주문, 2) 물류센터까지의 거리 (가까운 순)
+    depot = "제주물류센터"
+    def get_order_priority(order):
+        # priority가 1이면 최우선 (거리 무관)
+        if order.priority == 1:
+            return (0, 0)  # 최우선
+        # 그 외에는 물류센터까지의 거리로 정렬
+        distance = get_driving_time(depot, order.주유소명)
+        return (1, distance)  # priority=1이 아닌 주문은 거리순
+    
+    pending_orders.sort(key=get_order_priority)
 
     # 🔹 휘발유인 경우 제주96바7408 차량 찾기 (알뜰 주유소 전용)
     preferred_vehicle_idx = None
@@ -263,6 +276,10 @@ def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
             # 알뜰 주유소 주문 분리
             altteul_orders = [o for o in pending_orders if getattr(o, '브랜드', '') == '알뜰']
             sk_orders = [o for o in pending_orders if getattr(o, '브랜드', '') != '알뜰']
+            
+            # 🔹 알뜰 주유소 주문도 거리순으로 정렬
+            if altteul_orders:
+                altteul_orders.sort(key=get_order_priority)
             
             if altteul_orders:
                 # 1단계: 알뜰 주유소 주문에 대해 제주96바7408만 사용
@@ -293,6 +310,9 @@ def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
         else:
             # 등경유이거나 제주96바7408이 사용 불가능한 경우 기존 로직
             remaining_orders = pending_orders
+
+        # 🔹 각 라운드에서도 주문을 거리순으로 정렬 (가까운 곳부터 배차)
+        remaining_orders.sort(key=get_order_priority)
 
         # 🔹 지금까지 누적 작업량이 적은 차량부터 우선 사용
         available_indices = [i for i, t in vehicle_state.items() if t < WAREHOUSE_CLOSE_TIME]
