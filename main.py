@@ -418,13 +418,9 @@ def run_ortools(orders, vehicles, start_times, fuel_type, preferred_vehicle_idx=
     for i in range(len(vehicles)):
         idx = routing.Start(i)
         start_time = int(start_times[i])
-        # 🔹 차량이 가능한 한 빨리 시작하도록 제약 설정
+        # 🔹 모든 차량이 정확히 지정된 시간(7:00)에 시작하도록 제약 설정
         time_dim.CumulVar(idx).SetMin(start_time)
-        # 🔹 최대값도 설정하여 차량이 가능한 한 빨리 시작하도록 강제
-        # (약간의 여유를 두되, 가능한 한 빨리 시작)
-        time_dim.CumulVar(idx).SetMax(start_time + 30)  # 최대 30분 여유만 허용
-
-    time_dim.CumulVar(routing.Start(0)).SetRange(0, 1440)
+        time_dim.CumulVar(idx).SetMax(start_time)  # 최소값과 최대값을 동일하게 설정하여 정확히 해당 시간에 시작
     
     for i, order in enumerate(orders):
         index = manager.NodeToIndex(i + 1)
