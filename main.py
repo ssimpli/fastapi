@@ -263,6 +263,8 @@ def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
                 break
 
     # 🔹 vehicle_state: 차량이 물류센터에 도착한 시간 (적재 시작 가능 시간)
+    # 첫 배차: 7:00에 물류센터에 도착 → 7:00~7:30 적재 → 7:30 출발
+    # 이후 배차: 물류센터 도착 시간 → 적재 → 출발
     vehicle_state = {i: DRIVER_START_TIME for i in range(len(my_vehicles))} 
     vehicle_workload = {i: 0 for i in range(len(my_vehicles))}  # 🔹추가: 누적 수송량
     final_schedule = []
@@ -287,7 +289,7 @@ def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
             if altteul_orders:
                 # 1단계: 알뜰 주유소 주문에 대해 제주96바7408만 사용
                 preferred_vehicle = [my_vehicles[preferred_vehicle_idx]]
-                # 🔹 차량이 물류센터에 도착한 후 적재를 완료한 시간이 다음 배차 시작 시간
+                # 🔹 차량이 물류센터에 도착한 후 적재를 완료한 시간이 출발 시간
                 preferred_start = [vehicle_state[preferred_vehicle_idx] + LOADING_TIME]
                 
                 routes_preferred, remaining_altteul = run_ortools(
@@ -334,8 +336,7 @@ def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
                 if not available_indices: break
         
         current_vehicles = [my_vehicles[i] for i in available_indices]
-        # 🔹 차량이 물류센터에 도착한 후 적재를 완료한 시간이 다음 배차 시작 시간
-        # vehicle_state는 차량이 물류센터에 도착한 시간이므로, 적재 시간을 더함
+        # 🔹 차량이 물류센터에 도착한 후 적재를 완료한 시간이 출발 시간
         current_starts = [vehicle_state[i] + LOADING_TIME for i in available_indices]
         
         # 🔹 남은 주문 처리 시에는 제약 없이 모든 차량 사용 (단, 제주96바7408은 SK 주유소에 배차 안됨)
