@@ -19,7 +19,7 @@ app = FastAPI()
 # ==========================================
 DRIVER_START_TIME = 420  # 7:00 (제주물류센터 운영 시작 시간)
 LOADING_TIME = 30        # 적재 시간 30분
-WAREHOUSE_CLOSE_TIME = 1020  # 17:00 (오후 5:00, 물류센터 마감 시간 - 유조차 도착 마감)
+WAREHOUSE_CLOSE_TIME = 1050  # 17:30 (오후 5:30, 물류센터 마감 시간 - 유조차 도착 마감)
 GASOLINE_UNLOADING_TIME = 40  # 휘발유 하역 시간
 DIESEL_UNLOADING_TIME = 30     # 등경유 하역 시간    
 
