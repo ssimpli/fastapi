@@ -45,7 +45,7 @@ class OrderItem(BaseModel):
     휘발유: int = 0
     등유: int = 0
     경유: int = 0
-    start_min: int = 540
+    start_min: int = 420
     end_min: int = 1080
     priority: int = 2
     
