@@ -512,7 +512,7 @@ def run_ortools(orders, vehicles, start_times, fuel_type, preferred_vehicle_idx=
             index = routing.Start(v_idx)
             path = []
             load = 0
-            geometry_list = [] # 상세 경로
+            # geometry_list = [] # 상세 경로 (일단 비활성화)
 
             while not routing.IsEnd(index):
                 node_idx = manager.IndexToNode(index)
@@ -529,12 +529,12 @@ def run_ortools(orders, vehicles, start_times, fuel_type, preferred_vehicle_idx=
                 })
                 load += demands[node_idx]
 
-                # 상세 경로는 여기서 API 호출 (횟수 적음)
                 next_index = solution.Value(routing.NextVar(index))
-                if not routing.IsEnd(next_index):
-                    next_node_idx = manager.IndexToNode(next_index)
-                    segment_path = get_detailed_path_geometry(node_name, locs[next_node_idx])
-                    if segment_path: geometry_list.extend(segment_path)
+                # 상세 경로는 여기서 API 호출 (현재 비활성화 - 응답 데이터 축소)
+                # if not routing.IsEnd(next_index):
+                #     next_node_idx = manager.IndexToNode(next_index)
+                #     segment_path = get_detailed_path_geometry(node_name, locs[next_node_idx])
+                #     if segment_path: geometry_list.extend(segment_path)
                 
                 index = next_index
 
@@ -542,9 +542,10 @@ def run_ortools(orders, vehicles, start_times, fuel_type, preferred_vehicle_idx=
             end_time = solution.Min(time_dim.CumulVar(index))
             depot_coord = NODE_INFO.get(depot, {"lat": 0, "lon": 0})
             
-            last_loc = path[-1]["location"]
-            return_path = get_detailed_path_geometry(last_loc, depot)
-            if return_path: geometry_list.extend(return_path)
+            # 마지막 지점 → 물류센터 상세 경로도 비활성화
+            # last_loc = path[-1]["location"]
+            # return_path = get_detailed_path_geometry(last_loc, depot)
+            # if return_path: geometry_list.extend(return_path)
             
             path.append({
                 "location": depot,
@@ -562,8 +563,8 @@ def run_ortools(orders, vehicles, start_times, fuel_type, preferred_vehicle_idx=
                     "end_time": end_time,
                     "end_time_formatted": f"{end_time // 60:02d}:{end_time % 60:02d}",
                     "total_load": load, 
-                    "path": path,
-                    "geometry": geometry_list
+                    "path": path
+                    # "geometry": geometry_list  # 상세 경로 응답 비활성화
                 })
                 
     remaining = [orders[i] for i in range(len(orders)) if i not in fulfilled_indices]
