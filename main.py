@@ -372,6 +372,28 @@ def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
         debug_logs.append(f"라운드 {round_num}: run_ortools 호출 - 차량수: {len(current_vehicles)}, 주문수: {len(remaining_orders)}, 차량목록: {[v.차량번호 for v in current_vehicles]}")
         routes, remaining = run_ortools(remaining_orders, current_vehicles, current_starts, fuel_type, preferred_vehicle_idx=None)
         
+        # 🔹 solution을 찾지 못한 경우, 주문을 더 작은 그룹으로 나누어 시도
+        if not routes and len(remaining) == len(remaining_orders) and len(remaining_orders) > 10:
+            debug_logs.append(f"라운드 {round_num}: ⚠️ 전체 주문 처리 실패, 주문을 절반으로 나누어 재시도")
+            # 주문을 절반으로 나누어 시도
+            half = len(remaining_orders) // 2
+            first_half = remaining_orders[:half]
+            second_half = remaining_orders[half:]
+            
+            # 첫 번째 절반 시도
+            routes1, remaining1 = run_ortools(first_half, current_vehicles, current_starts, fuel_type, preferred_vehicle_idx=None)
+            if routes1:
+                routes = routes1
+                remaining = remaining1 + second_half
+                debug_logs.append(f"라운드 {round_num}: ✅ 첫 번째 절반 처리 성공 ({len(routes1)}개 배차)")
+            else:
+                # 두 번째 절반 시도
+                routes2, remaining2 = run_ortools(second_half, current_vehicles, current_starts, fuel_type, preferred_vehicle_idx=None)
+                if routes2:
+                    routes = routes2
+                    remaining = remaining2 + first_half
+                    debug_logs.append(f"라운드 {round_num}: ✅ 두 번째 절반 처리 성공 ({len(routes2)}개 배차)")
+        
         if not routes and len(remaining) == len(remaining_orders):
             break
 
@@ -550,7 +572,9 @@ def run_ortools(orders, vehicles, start_times, fuel_type, preferred_vehicle_idx=
             pass
         else:
             # 🔹 상대적으로 덜 중요한 주문만 선택적으로 방문
-            penalty = 1_000_000  # 꽤 크게
+            # penalty를 주문량에 비례하여 설정 (큰 주문을 제외하는 비용을 높임)
+            order_amount = order.휘발유 if fuel_type == '휘발유' else (order.등유 + order.경유)
+            penalty = 1_000_000 + (order_amount * 1000)  # 주문량이 클수록 penalty 증가
             routing.AddDisjunction([index], penalty)
 
 
