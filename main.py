@@ -238,6 +238,12 @@ def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
 
     my_vehicles = [v for v in all_vehicles if v.유종 == fuel_type]
     
+    # 🔹 디버깅: 입력 차량 데이터 확인
+    debug_logs.append(f"입력 차량 수: {len(all_vehicles)}, {fuel_type} 차량 수: {len(my_vehicles)}")
+    for v in all_vehicles:
+        if v.차량번호 in ["제주96바7400", "제주96바7403"]:
+            debug_logs.append(f"입력데이터: {v.차량번호} - 유종: '{v.유종}', 수송용량: {v.수송용량}, 필터링 후 포함: {v in my_vehicles}")
+    
     if not pending_orders or not my_vehicles:
         return {"status": "skipped", "routes": [], "debug_logs": debug_logs}
     
@@ -268,6 +274,11 @@ def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
     vehicle_state = {i: DRIVER_START_TIME for i in range(len(my_vehicles))} 
     vehicle_workload = {i: 0 for i in range(len(my_vehicles))}  # 🔹추가: 누적 수송량
     final_schedule = []
+    
+    # 🔹 디버깅: 초기 차량 목록 확인
+    for i, v in enumerate(my_vehicles):
+        if v.차량번호 in ["제주96바7400", "제주96바7403"]:
+            debug_logs.append(f"초기상태: {v.차량번호} - 유종: {v.유종}, 수송용량: {v.수송용량}, 인덱스: {i}")
     
     for round_num in range(1, 6):
         if not pending_orders: break
@@ -324,6 +335,13 @@ def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
         # 🔹 지금까지 누적 작업량이 적은 차량부터 우선 사용
         available_indices = [i for i, t in vehicle_state.items() if t < WAREHOUSE_CLOSE_TIME]
         if not available_indices: break
+        
+        # 🔹 디버깅: available_indices 계산 후 7400, 7403 상태 확인
+        for i in available_indices:
+            v = my_vehicles[i]
+            if v.차량번호 in ["제주96바7400", "제주96바7403"]:
+                debug_logs.append(f"라운드 {round_num}: {v.차량번호} - available_indices에 포함됨 (인덱스: {i}, 도착시간: {vehicle_state[i]}분, 작업량: {vehicle_workload[i]})")
+        
         available_indices.sort(key=lambda i: vehicle_workload[i])
         
         # 🔹 휘발유이고 SK 주유소 주문이 포함된 경우, 제주96바7408 제외
@@ -336,6 +354,14 @@ def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
                 if not available_indices: break
         
         current_vehicles = [my_vehicles[i] for i in available_indices]
+        
+        # 🔹 디버깅: current_vehicles에 7400, 7403 포함 여부 확인
+        current_vehicle_numbers = [v.차량번호 for v in current_vehicles]
+        for target in ["제주96바7400", "제주96바7403"]:
+            if target in current_vehicle_numbers:
+                debug_logs.append(f"라운드 {round_num}: {target} - current_vehicles에 포함됨 (총 {len(current_vehicles)}대)")
+            else:
+                debug_logs.append(f"라운드 {round_num}: {target} - current_vehicles에 포함되지 않음 (현재 차량: {', '.join(current_vehicle_numbers)})")
         # 🔹 차량이 물류센터에 도착한 후 적재를 완료한 시간이 출발 시간
         current_starts = [vehicle_state[i] + LOADING_TIME for i in available_indices]
         
@@ -345,8 +371,11 @@ def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
         if not routes and len(remaining) == len(remaining_orders):
             break
 
+        # 🔹 사용된 차량 인덱스 추적
+        used_vehicle_indices = set()
         for r in routes:
             real_v_idx = available_indices[r['internal_idx']]
+            used_vehicle_indices.add(real_v_idx)
             
             # 🔹 차량이 물류센터에 도착한 시간으로 저장 (적재 시작 가능 시간)
             vehicle_state[real_v_idx] = r['end_time']
@@ -355,6 +384,20 @@ def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
             r['round'] = round_num
             r['vehicle_id'] = my_vehicles[real_v_idx].차량번호
             final_schedule.append(r)
+        
+        # 🔹 디버깅: 사용되지 않은 차량 확인
+        unused_indices = [i for i in available_indices if i not in used_vehicle_indices]
+        if unused_indices:
+            unused_vehicles = [my_vehicles[i].차량번호 for i in unused_indices]
+            debug_logs.append(f"라운드 {round_num}: 사용되지 않은 차량: {', '.join(unused_vehicles)}")
+        
+        # 🔹 디버깅: 7400, 7403 차량 상태 추적
+        for i, v in enumerate(my_vehicles):
+            if v.차량번호 in ["제주96바7400", "제주96바7403"]:
+                is_available = i in available_indices
+                arrival_time = vehicle_state[i]
+                workload = vehicle_workload[i]
+                debug_logs.append(f"라운드 {round_num}: {v.차량번호} - 사용가능: {is_available}, 도착시간: {arrival_time}분({arrival_time//60:02d}:{arrival_time%60:02d}), 작업량: {workload}, 인덱스: {i}")
             
         pending_orders = remaining
 
@@ -396,6 +439,12 @@ def run_ortools(orders, vehicles, start_times, fuel_type, preferred_vehicle_idx=
     """
     preferred_vehicle_idx: 알뜰 주유소를 처리할 우선 차량 인덱스 (None이면 제약 없음)
     """
+    # 🔹 디버깅: run_ortools에 전달된 차량 목록 확인
+    debug_info = []
+    for i, v in enumerate(vehicles):
+        if v.차량번호 in ["제주96바7400", "제주96바7403"]:
+            debug_info.append(f"run_ortools: {v.차량번호} - vehicles 리스트에 포함됨 (인덱스: {i}, 수송용량: {v.수송용량}, 시작시간: {start_times[i]}분)")
+    
     depot = "제주물류센터"
     locs = [depot] + [o.주유소명 for o in orders]
     N = len(locs)
@@ -484,11 +533,13 @@ def run_ortools(orders, vehicles, start_times, fuel_type, preferred_vehicle_idx=
     fulfilled_indices = set()
     
     if solution:
+        # 🔹 디버깅: OR-Tools에서 선택된 차량 확인
+        used_vehicle_indices_in_ortools = set()
         for v_idx in range(len(vehicles)):
             index = routing.Start(v_idx)
             path = []
             load = 0
-            geometry_list = [] # 상세 경로
+            # geometry_list = [] # 상세 경로 (디버깅 중이므로 비활성화)
 
             while not routing.IsEnd(index):
                 node_idx = manager.IndexToNode(index)
@@ -505,12 +556,12 @@ def run_ortools(orders, vehicles, start_times, fuel_type, preferred_vehicle_idx=
                 })
                 load += demands[node_idx]
 
-                # 상세 경로는 여기서 API 호출 (횟수 적음)
+                # 상세 경로는 여기서 API 호출 (횟수 적음) - 디버깅 중이므로 비활성화
                 next_index = solution.Value(routing.NextVar(index))
-                if not routing.IsEnd(next_index):
-                    next_node_idx = manager.IndexToNode(next_index)
-                    segment_path = get_detailed_path_geometry(node_name, locs[next_node_idx])
-                    if segment_path: geometry_list.extend(segment_path)
+                # if not routing.IsEnd(next_index):
+                #     next_node_idx = manager.IndexToNode(next_index)
+                #     segment_path = get_detailed_path_geometry(node_name, locs[next_node_idx])
+                #     if segment_path: geometry_list.extend(segment_path)
                 
                 index = next_index
 
@@ -518,9 +569,9 @@ def run_ortools(orders, vehicles, start_times, fuel_type, preferred_vehicle_idx=
             end_time = solution.Min(time_dim.CumulVar(index))
             depot_coord = NODE_INFO.get(depot, {"lat": 0, "lon": 0})
             
-            last_loc = path[-1]["location"]
-            return_path = get_detailed_path_geometry(last_loc, depot)
-            if return_path: geometry_list.extend(return_path)
+            # last_loc = path[-1]["location"]
+            # return_path = get_detailed_path_geometry(last_loc, depot)
+            # if return_path: geometry_list.extend(return_path)
             
             path.append({
                 "location": depot,
@@ -531,6 +582,7 @@ def run_ortools(orders, vehicles, start_times, fuel_type, preferred_vehicle_idx=
             if len(path) > 2:
                 # 시작 시간 계산 (첫 번째 노드의 시간)
                 start_time = solution.Min(time_dim.CumulVar(routing.Start(v_idx))) if len(path) > 0 else 0
+                used_vehicle_indices_in_ortools.add(v_idx)
                 routes.append({
                     "internal_idx": v_idx, 
                     "start_time": start_time,
@@ -539,17 +591,50 @@ def run_ortools(orders, vehicles, start_times, fuel_type, preferred_vehicle_idx=
                     "end_time_formatted": f"{end_time // 60:02d}:{end_time % 60:02d}",
                     "total_load": load, 
                     "path": path,
-                    "geometry": geometry_list
+                    # "geometry": geometry_list  # 디버깅 중이므로 비활성화
                 })
+        
+        # 🔹 디버깅: OR-Tools에서 사용되지 않은 차량 확인
+        for v_idx, v in enumerate(vehicles):
+            if v.차량번호 in ["제주96바7400", "제주96바7403"]:
+                if v_idx in used_vehicle_indices_in_ortools:
+                    debug_info.append(f"run_ortools: {v.차량번호} - OR-Tools에서 선택됨 (인덱스: {v_idx})")
+                else:
+                    debug_info.append(f"run_ortools: {v.차량번호} - OR-Tools에서 선택되지 않음 (인덱스: {v_idx}, 주문수: {len(orders)})")
+    
+    # 🔹 디버깅 정보를 반환값에 포함 (임시로 print로 출력)
+    if debug_info:
+        print("\n".join(debug_info))
                 
     remaining = [orders[i] for i in range(len(orders)) if i not in fulfilled_indices]
     return routes, remaining
 
 @app.post("/optimize")
 def optimize(req: OptimizationRequest):
+    # 🔹 디버깅: API 요청 데이터 확인
+    debug_info = []
+    for v in req.vehicles:
+        if v.차량번호 in ["제주96바7400", "제주96바7403"]:
+            debug_info.append(f"API요청: {v.차량번호} - 유종: '{v.유종}', 수송용량: {v.수송용량}")
+    if debug_info:
+        print("\n".join(debug_info))
+    
     gas = solve_multitrip_vrp(req.orders, req.vehicles, "휘발유")
     diesel = solve_multitrip_vrp(req.orders, req.vehicles, "등경유")
-    return {"gasoline": gas, "diesel": diesel}
+    
+    # 🔹 디버그 로그를 상위 레벨로도 포함 (n8n에서 쉽게 접근)
+    all_debug_logs = gas.get("debug_logs", []) + diesel.get("debug_logs", [])
+    
+    return {
+        "gasoline": gas, 
+        "diesel": diesel,
+        "debug_logs": all_debug_logs,  # 🔹 모든 디버그 로그를 최상위에도 포함
+        "debug_summary": {
+            "gasoline_logs_count": len(gas.get("debug_logs", [])),
+            "diesel_logs_count": len(diesel.get("debug_logs", [])),
+            "total_logs_count": len(all_debug_logs)
+        }
+    }
 
 @app.get("/")
 def health():
