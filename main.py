@@ -279,7 +279,7 @@ def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
     vehicle_state = {i: DRIVER_START_TIME for i in range(len(my_vehicles))} 
     vehicle_workload = {i: 0 for i in range(len(my_vehicles))}  # 누적 수송량
     final_schedule = []
-    round_num = 1
+    round_altteul = 1  # 🔹 7408 알뜰 전용 라운드 번호
 
     # ==========================================
     # 4-1. (휘발유) 알뜰 주유소: 7408이 가능할 때까지 먼저 최대한 배차
@@ -301,18 +301,23 @@ def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
             for r in routes_preferred:
                 vehicle_state[preferred_vehicle_idx] = r['end_time'] + LOADING_TIME
                 vehicle_workload[preferred_vehicle_idx] += r["total_load"]
-                r['round'] = round_num
+                r['round'] = round_altteul
                 r['vehicle_id'] = my_vehicles[preferred_vehicle_idx].차량번호
                 final_schedule.append(r)
 
             altteul_orders = remaining_altteul
-            round_num += 1
-            if round_num > 10:
-                debug_logs.append("라운드 10회를 초과하여 안전 종료(알뜰 전용 단계)")
+            round_altteul += 1
+            if round_altteul > 10:
+                debug_logs.append("알뜰 전용 단계에서 라운드 10회를 초과하여 안전 종료")
                 break
 
         # 7408이 처리하지 못한 알뜰 주문은 SK 주문과 합쳐서 다음 단계에서 7400/7403이 함께 처리
         pending_orders = pending_orders + altteul_orders
+
+    # ==========================================
+    # 🔹 SK + (남은 알뜰) 단계 라운드 번호는 다시 1부터 시작
+    # ==========================================
+    round_main = 1
 
     # ==========================================
     # 4-2. 나머지 주문:
@@ -349,7 +354,7 @@ def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
             # 모든 차량이 18:00 이후가 되었는지 확인
             all_vehicles_after_close = all(vehicle_state[i] >= VEHICLE_AVAILABLE_THRESHOLD for i in range(len(my_vehicles)))
             if all_vehicles_after_close:
-                debug_logs.append(f"라운드 {round_num}: 모든 차량이 18:00 이후, 배차 종료")
+                debug_logs.append(f"라운드 {round_main}: 모든 차량이 18:00 이후, 배차 종료")
                 break
             
             # 일부 차량이 아직 18:00 전이면, 시간 제약이 너무 엄격한 주문을 필터링하고 재시도
@@ -370,18 +375,18 @@ def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
             
             if skipped_due_to_time:
                 debug_logs.append(
-                    f"라운드 {round_num}: 시간 제약으로 처리 불가능한 주문 {len(skipped_due_to_time)}개: "
+                    f"라운드 {round_main}: 시간 제약으로 처리 불가능한 주문 {len(skipped_due_to_time)}개: "
                     f"{', '.join(skipped_due_to_time[:3])}{'...' if len(skipped_due_to_time) > 3 else ''}"
                 )
             
             if processable_orders:
                 pending_orders = processable_orders
                 debug_logs.append(
-                    f"라운드 {round_num}: OR-Tools 해 탐색 실패, 처리 가능한 주문 {len(processable_orders)}개로 재시도"
+                    f"라운드 {round_main}: OR-Tools 해 탐색 실패, 처리 가능한 주문 {len(processable_orders)}개로 재시도"
                 )
                 continue  # 다음 라운드로
             else:
-                debug_logs.append(f"라운드 {round_num}: 처리 가능한 주문 없음, 배차 종료")
+                debug_logs.append(f"라운드 {round_main}: 처리 가능한 주문 없음, 배차 종료")
                 break
 
         # 해를 찾았을 때 차량 상태 업데이트
@@ -389,16 +394,16 @@ def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
             real_v_idx = available_indices[r['internal_idx']]
             vehicle_state[real_v_idx] = r['end_time'] + LOADING_TIME
             vehicle_workload[real_v_idx] += r["total_load"]
-            r['round'] = round_num
+            r['round'] = round_main
             r['vehicle_id'] = my_vehicles[real_v_idx].차량번호
             final_schedule.append(r)
             
         pending_orders = remaining
-        round_num += 1
+        round_main += 1
         
         # 안전장치: 라운드 과도 증가 방지
-        if round_num > 10:
-            debug_logs.append("라운드 10회를 초과하여 안전 종료(일반 단계)")
+        if round_main > 10:
+            debug_logs.append("일반 단계에서 라운드 10회를 초과하여 안전 종료")
             break
 
     # 미처리 주문 상세 정보 생성
