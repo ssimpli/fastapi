@@ -493,15 +493,18 @@ def run_ortools(orders, vehicles, start_times, fuel_type, preferred_vehicle_idx=
             effective_end_min = max(order.end_min, min_arrival_time)  # 더 이른 값 중 큰 값 사용
         
         time_dim.CumulVar(index).SetRange(order.start_min, effective_end_min)
-    
-        if order.priority == 1:
-            # 🔹 필수 방문: Disjunction 안 걸어줌
-            # (솔버가 이 노드를 빼버릴 수 없음)
-            pass
+        
+        # 🔹 priority에 따라 패널티를 다르게 주되, 모든 주문은 Disjunction으로 "선택적 방문"으로 모델링
+        #    - priority 1: 거의 반드시 가야 하지만, 물리적으로 불가능한 경우를 위해서라도 드물게 제외 가능하게 함
+        #    - priority 2: 기본값 (일반 주문)
+        #    - priority 3 이상: 상대적으로 덜 중요한 주문
+        if order.priority <= 1:
+            penalty = 10_000_000  # 매우 크게 (가능하면 반드시 방문)
+        elif order.priority == 2:
+            penalty = 1_000_000   # 기본 패널티
         else:
-            # 🔹 상대적으로 덜 중요한 주문만 선택적으로 방문
-            penalty = 1_000_000  # 꽤 크게
-            routing.AddDisjunction([index], penalty)
+            penalty = 100_000     # 덜 중요한 주문은 상대적으로 낮게
+        routing.AddDisjunction([index], penalty)
 
 
     demands = [0] + [ (o.휘발유 if fuel_type=="휘발유" else o.등유+o.경유) for o in orders ]
