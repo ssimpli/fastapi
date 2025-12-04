@@ -561,11 +561,26 @@ def run_ortools(orders, vehicles, start_times, fuel_type, preferred_vehicle_idx=
     routing.AddDimensionWithVehicleCapacity(cap_idx, 0, [v.수송용량 for v in vehicles], True, "Capacity")
 
     search_params = pywrapcp.DefaultRoutingSearchParameters()
-    search_params.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
-    search_params.time_limit.seconds = 10  # 🔹 최적화 시간을 늘려서 더 나은 해를 찾도록
+    # 🔹 여러 전략을 시도하여 해를 찾도록
+    search_params.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.AUTOMATIC
+    search_params.time_limit.seconds = 30  # 🔹 최적화 시간을 더 늘려서 해를 찾도록 (10초 → 30초)
     # 🔹 차량이 가능한 한 빨리 시작하도록 최적화
     search_params.local_search_metaheuristic = routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
+    # 🔹 추가 전략 시도
+    if hasattr(search_params, 'use_full_propagation'):
+        search_params.use_full_propagation = True  # 전체 전파 사용
     solution = routing.SolveWithParameters(search_params)
+    
+    # 🔹 첫 번째 시도에서 해를 찾지 못하면 다른 전략 시도
+    if solution is None:
+        debug_info.append(f"run_ortools: 첫 번째 시도 실패, 다른 전략 시도 중...")
+        search_params.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.SAVINGS
+        solution = routing.SolveWithParameters(search_params)
+    
+    if solution is None:
+        debug_info.append(f"run_ortools: 두 번째 시도 실패, 세 번째 전략 시도 중...")
+        search_params.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.CHRISTOFIDES
+        solution = routing.SolveWithParameters(search_params)
     
     # 🔹 디버깅: OR-Tools solution 상태 확인
     if solution is None:
