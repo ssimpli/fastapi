@@ -239,6 +239,12 @@ def get_detailed_path_geometry(start_name, end_name):
 def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
     debug_logs = []
     pending_orders = []
+    # 🔹 차량이 "다음 회차를 시작할 수 있는지" 판정 기준
+    # - 기존: vehicle_state(= 이전 end_time + LOADING_TIME) < WAREHOUSE_CLOSE_TIME(18:00)
+    # - 변경: 실제 도착시간 end_time < 18:00 이면, 상차 30분이 걸리더라도 한 번 더 돌 수 있게 허용
+    #   end_time = vehicle_state - LOADING_TIME 이므로,
+    #   vehicle_state < WAREHOUSE_CLOSE_TIME + LOADING_TIME 가 되면 한 번 더 가능
+    VEHICLE_AVAILABLE_THRESHOLD = WAREHOUSE_CLOSE_TIME + LOADING_TIME
     for o in all_orders:
         amt = o.휘발유 if fuel_type == "휘발유" else (o.등유 + o.경유)
         if amt > 0: pending_orders.append(o)
@@ -265,7 +271,7 @@ def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
     
     for round_num in range(1, 6):
         if not pending_orders: break
-        available_indices = [i for i, t in vehicle_state.items() if t < WAREHOUSE_CLOSE_TIME]
+        available_indices = [i for i, t in vehicle_state.items() if t < VEHICLE_AVAILABLE_THRESHOLD]
         if not available_indices: break
 
         # 🔹 휘발유이고 알뜰 주유소 주문이 있는 경우, 제주96바7408 우선 사용
@@ -305,7 +311,7 @@ def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
             remaining_orders = pending_orders
 
         # 🔹 지금까지 누적 작업량이 적은 차량부터 우선 사용
-        available_indices = [i for i, t in vehicle_state.items() if t < WAREHOUSE_CLOSE_TIME]
+        available_indices = [i for i, t in vehicle_state.items() if t < VEHICLE_AVAILABLE_THRESHOLD]
         if not available_indices: break
         available_indices.sort(key=lambda i: vehicle_workload[i])
         
@@ -327,7 +333,7 @@ def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
         # 🔹 OR-Tools가 해를 찾지 못했을 때 처리
         if not routes and len(remaining) == len(remaining_orders):
             # 모든 차량이 18:00 이후가 되었는지 확인
-            all_vehicles_after_close = all(vehicle_state[i] >= WAREHOUSE_CLOSE_TIME for i in range(len(my_vehicles)))
+            all_vehicles_after_close = all(vehicle_state[i] >= VEHICLE_AVAILABLE_THRESHOLD for i in range(len(my_vehicles)))
             if all_vehicles_after_close:
                 # 모든 차량이 18:00 이후면 더 이상 배차 불가
                 debug_logs.append(f"라운드 {round_num}: 모든 차량이 18:00 이후, 배차 종료")
