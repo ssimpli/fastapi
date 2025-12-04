@@ -239,26 +239,36 @@ def get_detailed_path_geometry(start_name, end_name):
 def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
     debug_logs = []
     pending_orders = []
+    altteul_orders = []  # 🔹 (휘발유 전용) 알뜰 주유소 주문 리스트
+
     # 🔹 차량이 "다음 회차를 시작할 수 있는지" 판정 기준
-    # - 기존: vehicle_state(= 이전 end_time + LOADING_TIME) < WAREHOUSE_CLOSE_TIME(18:00)
-    # - 변경: 실제 도착시간 end_time < 18:00 이면, 상차 30분이 걸리더라도 한 번 더 돌 수 있게 허용
     #   end_time = vehicle_state - LOADING_TIME 이므로,
     #   vehicle_state < WAREHOUSE_CLOSE_TIME + LOADING_TIME 가 되면 한 번 더 가능
     VEHICLE_AVAILABLE_THRESHOLD = WAREHOUSE_CLOSE_TIME + LOADING_TIME
 
+    # 1단계: 주문 분리
     for o in all_orders:
         amt = o.휘발유 if fuel_type == "휘발유" else (o.등유 + o.경유)
-        if amt > 0: pending_orders.append(o)
+        if amt > 0:
+            # 휘발유 모드에서는 알뜰 주문을 우선적으로 7408 전용 리스트에 분리
+            if fuel_type == "휘발유" and getattr(o, '브랜드', '') == '알뜰':
+                altteul_orders.append(o)
+            else:
+                pending_orders.append(o)
         else:
-            if fuel_type == "휘발유" and (o.등유 > 0 or o.경유 > 0): pass
-            else: debug_logs.append(f"제외됨(주문량0): {o.주유소명}")
+            if fuel_type == "휘발유" and (o.등유 > 0 or o.경유 > 0):
+                # 휘발유 모드에서 등/경유만 있는 주문은 디젤 단계에서 처리
+                pass
+            else:
+                debug_logs.append(f"제외됨(주문량0): {o.주유소명}")
 
     my_vehicles = [v for v in all_vehicles if v.유종 == fuel_type]
     
-    if not pending_orders or not my_vehicles:
+    # 처리할 주문(알뜰 + 일반)이 하나도 없으면 스킵
+    if (not pending_orders and not altteul_orders) or not my_vehicles:
         return {"status": "skipped", "routes": [], "debug_logs": debug_logs}
 
-    # 🔹 휘발유인 경우 제주96바7408 차량 찾기 (알뜰 주유소 전용)
+    # 휘발유인 경우 제주96바7408 차량 찾기 (알뜰 주유소 우선 차량)
     preferred_vehicle_idx = None
     if fuel_type == "휘발유":
         for i, v in enumerate(my_vehicles):
@@ -267,12 +277,48 @@ def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
                 break
 
     vehicle_state = {i: DRIVER_START_TIME for i in range(len(my_vehicles))} 
-    vehicle_workload = {i: 0 for i in range(len(my_vehicles))}  # 🔹추가: 누적 수송량
+    vehicle_workload = {i: 0 for i in range(len(my_vehicles))}  # 누적 수송량
     final_schedule = []
     round_num = 1
-    
-    # 🔹 더 이상 배차 가능한 차량이 없거나, 처리할 주문이 없을 때까지 반복
-    #    (기존: 최대 5라운드로 고정 → 일부 주문이 남아도 추가 라운드가 생성되지 않는 문제)
+
+    # ==========================================
+    # 4-1. (휘발유) 알뜰 주유소: 7408이 가능할 때까지 먼저 최대한 배차
+    #      - 여기서 처리하지 못한 알뜰은 나중에 SK와 합쳐서 7400/7403이 처리
+    # ==========================================
+    if fuel_type == "휘발유" and preferred_vehicle_idx is not None and altteul_orders:
+        while altteul_orders and vehicle_state[preferred_vehicle_idx] < VEHICLE_AVAILABLE_THRESHOLD:
+            preferred_vehicle = [my_vehicles[preferred_vehicle_idx]]
+            preferred_start = [vehicle_state[preferred_vehicle_idx]]
+
+            routes_preferred, remaining_altteul = run_ortools(
+                altteul_orders, preferred_vehicle, preferred_start, fuel_type, preferred_vehicle_idx=0
+            )
+
+            if not routes_preferred:
+                # 더 이상 7408로 배차 가능한 알뜰 주문이 없음
+                break
+
+            for r in routes_preferred:
+                vehicle_state[preferred_vehicle_idx] = r['end_time'] + LOADING_TIME
+                vehicle_workload[preferred_vehicle_idx] += r["total_load"]
+                r['round'] = round_num
+                r['vehicle_id'] = my_vehicles[preferred_vehicle_idx].차량번호
+                final_schedule.append(r)
+
+            altteul_orders = remaining_altteul
+            round_num += 1
+            if round_num > 10:
+                debug_logs.append("라운드 10회를 초과하여 안전 종료(알뜰 전용 단계)")
+                break
+
+        # 7408이 처리하지 못한 알뜰 주문은 SK 주문과 합쳐서 다음 단계에서 7400/7403이 함께 처리
+        pending_orders = pending_orders + altteul_orders
+
+    # ==========================================
+    # 4-2. 나머지 주문:
+    #      - 휘발유: SK + (남은 알뜰) → 7400/7403 등으로 처리, 7408은 제외
+    #      - 디젤: 전체 유효 주문을 모든 디젤 차량으로 처리
+    # ==========================================
     while True:
         if not pending_orders:
             break
@@ -280,113 +326,69 @@ def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
         if not available_indices:
             break
 
-        # 🔹 휘발유이고 알뜰 주유소 주문이 있는 경우, 제주96바7408 우선 사용
-        if fuel_type == "휘발유" and preferred_vehicle_idx is not None and preferred_vehicle_idx in available_indices:
-            # 알뜰 주유소 주문 분리
-            altteul_orders = [o for o in pending_orders if getattr(o, '브랜드', '') == '알뜰']
-            sk_orders = [o for o in pending_orders if getattr(o, '브랜드', '') != '알뜰']
-            
-            if altteul_orders:
-                # 1단계: 알뜰 주유소 주문에 대해 제주96바7408만 사용
-                preferred_vehicle = [my_vehicles[preferred_vehicle_idx]]
-                preferred_start = [vehicle_state[preferred_vehicle_idx]]
-                
-                routes_preferred, remaining_altteul = run_ortools(
-                    altteul_orders, preferred_vehicle, preferred_start, fuel_type, preferred_vehicle_idx=0
-                )
-                
-                # 제주96바7408로 처리된 경우 상태 업데이트
-                if routes_preferred:
-                    for r in routes_preferred:
-                        vehicle_state[preferred_vehicle_idx] = r['end_time'] + LOADING_TIME
-                        vehicle_workload[preferred_vehicle_idx] += r["total_load"]
-                        r['round'] = round_num
-                        r['vehicle_id'] = my_vehicles[preferred_vehicle_idx].차량번호
-                        final_schedule.append(r)
-                    
-                    # 🔹 남은 알뜰 주문과 SK 주문을 합쳐서 다음 단계에서 7400/7403이 함께 처리
-                    remaining_orders = remaining_altteul + sk_orders
-                else:
-                    # 🔹 7408으로 처리 못한 경우, 알뜰+SK 전부를 다른 차량(7400/7403)에게 넘김
-                    remaining_orders = altteul_orders + sk_orders
-            else:
-                # 알뜰 주유소 주문이 없으면 기존 로직대로
-                remaining_orders = pending_orders
-        else:
-            # 등경유이거나 제주96바7408이 사용 불가능한 경우 기존 로직
-            remaining_orders = pending_orders
-
-        # 🔹 지금까지 누적 작업량이 적은 차량부터 우선 사용
+        # 지금까지 누적 작업량이 적은 차량부터 우선 사용
         available_indices = [i for i, t in vehicle_state.items() if t < VEHICLE_AVAILABLE_THRESHOLD]
-        if not available_indices: break
+        if not available_indices:
+            break
         available_indices.sort(key=lambda i: vehicle_workload[i])
         
-        # 🔹 휘발유이고 SK 주유소 주문이 포함된 경우, 제주96바7408 제외
+        # 휘발유의 2단계(SK+남은 알뜰)는 7408을 제외하고 7400/7403 등만 사용
         if fuel_type == "휘발유" and preferred_vehicle_idx is not None:
-            # remaining_orders에 SK 주유소 주문이 있는지 확인
-            has_sk_orders = any(getattr(o, '브랜드', '') != '알뜰' for o in remaining_orders)
-            if has_sk_orders:
-                # SK 주유소 주문이 있으면 제주96바7408 제외
-                available_indices = [i for i in available_indices if i != preferred_vehicle_idx]
-                if not available_indices: break
+            available_indices = [i for i in available_indices if i != preferred_vehicle_idx]
+            if not available_indices:
+                break
         
         current_vehicles = [my_vehicles[i] for i in available_indices]
         current_starts = [vehicle_state[i] for i in available_indices]
         
-        # 🔹 남은 주문 처리 시에는 제약 없이 모든 차량 사용 (단, 제주96바7408은 SK 주유소에 배차 안됨)
-        routes, remaining = run_ortools(remaining_orders, current_vehicles, current_starts, fuel_type, preferred_vehicle_idx=None)
+        # 남은 주문 처리 (휘발유: SK+남은 알뜰, 디젤: 전체)
+        routes, remaining = run_ortools(pending_orders, current_vehicles, current_starts, fuel_type, preferred_vehicle_idx=None)
         
-        # 🔹 OR-Tools가 해를 찾지 못했을 때 처리
-        if not routes and len(remaining) == len(remaining_orders):
+        # OR-Tools가 해를 찾지 못했을 때 처리
+        if not routes and len(remaining) == len(pending_orders):
             # 모든 차량이 18:00 이후가 되었는지 확인
             all_vehicles_after_close = all(vehicle_state[i] >= VEHICLE_AVAILABLE_THRESHOLD for i in range(len(my_vehicles)))
             if all_vehicles_after_close:
-                # 모든 차량이 18:00 이후면 더 이상 배차 불가
                 debug_logs.append(f"라운드 {round_num}: 모든 차량이 18:00 이후, 배차 종료")
                 break
             
-            # 🔹 일부 차량이 아직 18:00 전이면, 시간 제약이 너무 엄격한 주문을 필터링하고 재시도
-            # 현재 사용 가능한 차량의 최소 시작 시간 계산
+            # 일부 차량이 아직 18:00 전이면, 시간 제약이 너무 엄격한 주문을 필터링하고 재시도
             min_available_start = min(current_starts) if current_starts else WAREHOUSE_CLOSE_TIME
-            
-            # 처리 불가능한 주문 필터링 (도착 시간이 차량 시작 시간 + 이동시간 + 하역시간보다 이른 경우)
             processable_orders = []
             skipped_due_to_time = []
-            
-            # 출발 지점(물류센터) 이름
             depot = "제주물류센터"
 
-            for order in remaining_orders:
+            for order in pending_orders:
                 travel_time = get_driving_time(depot, order.주유소명)
                 service_time = GASOLINE_UNLOADING_TIME if fuel_type == "휘발유" else DIESEL_UNLOADING_TIME
                 min_arrival = min_available_start + travel_time + service_time
                 
-                # 주문의 종료 시간이 계산된 최소 도착 시간보다 늦거나 같으면 처리 가능
                 if order.end_min >= min_arrival:
                     processable_orders.append(order)
                 else:
                     skipped_due_to_time.append(order.주유소명)
             
             if skipped_due_to_time:
-                debug_logs.append(f"라운드 {round_num}: 시간 제약으로 처리 불가능한 주문 {len(skipped_due_to_time)}개: {', '.join(skipped_due_to_time[:3])}{'...' if len(skipped_due_to_time) > 3 else ''}")
+                debug_logs.append(
+                    f"라운드 {round_num}: 시간 제약으로 처리 불가능한 주문 {len(skipped_due_to_time)}개: "
+                    f"{', '.join(skipped_due_to_time[:3])}{'...' if len(skipped_due_to_time) > 3 else ''}"
+                )
             
-            # 처리 가능한 주문이 있으면 다음 라운드에서 재시도
             if processable_orders:
                 pending_orders = processable_orders
-                debug_logs.append(f"라운드 {round_num}: OR-Tools 해 탐색 실패, 처리 가능한 주문 {len(processable_orders)}개로 재시도")
+                debug_logs.append(
+                    f"라운드 {round_num}: OR-Tools 해 탐색 실패, 처리 가능한 주문 {len(processable_orders)}개로 재시도"
+                )
                 continue  # 다음 라운드로
             else:
-                # 처리 가능한 주문이 없으면 종료
                 debug_logs.append(f"라운드 {round_num}: 처리 가능한 주문 없음, 배차 종료")
                 break
 
-        # 🔹 해를 찾았을 때 차량 상태 업데이트
+        # 해를 찾았을 때 차량 상태 업데이트
         for r in routes:
             real_v_idx = available_indices[r['internal_idx']]
-            
             vehicle_state[real_v_idx] = r['end_time'] + LOADING_TIME
-            vehicle_workload[real_v_idx] += r["total_load"]       # 🔹이 차량 누적 수송량 증가
-            
+            vehicle_workload[real_v_idx] += r["total_load"]
             r['round'] = round_num
             r['vehicle_id'] = my_vehicles[real_v_idx].차량번호
             final_schedule.append(r)
@@ -394,12 +396,12 @@ def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
         pending_orders = remaining
         round_num += 1
         
-        # 🔹 안전장치: 혹시라도 비정상적으로 라운드가 너무 많이 돌 경우를 방지
+        # 안전장치: 라운드 과도 증가 방지
         if round_num > 10:
-            debug_logs.append("라운드 10회를 초과하여 안전 종료")
+            debug_logs.append("라운드 10회를 초과하여 안전 종료(일반 단계)")
             break
 
-    # 🔹 미처리 주문 상세 정보 생성
+    # 미처리 주문 상세 정보 생성
     skipped_list = []
     for o in pending_orders:
         order_info = {
