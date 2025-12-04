@@ -341,6 +341,9 @@ def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
             processable_orders = []
             skipped_due_to_time = []
             
+            # 출발 지점(물류센터) 이름
+            depot = "제주물류센터"
+
             for order in remaining_orders:
                 travel_time = get_driving_time(depot, order.주유소명)
                 service_time = GASOLINE_UNLOADING_TIME if fuel_type == "휘발유" else DIESEL_UNLOADING_TIME
