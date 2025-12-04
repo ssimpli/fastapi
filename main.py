@@ -445,6 +445,12 @@ def run_ortools(orders, vehicles, start_times, fuel_type, preferred_vehicle_idx=
         if v.차량번호 in ["제주96바7400", "제주96바7403"]:
             debug_info.append(f"run_ortools: {v.차량번호} - vehicles 리스트에 포함됨 (인덱스: {i}, 수송용량: {v.수송용량}, 시작시간: {start_times[i]}분)")
     
+    # 🔹 디버깅: 주문 정보 요약
+    if orders:
+        total_demand = sum(o.휘발유 if fuel_type=="휘발유" else o.등유+o.경유 for o in orders)
+        total_capacity = sum(v.수송용량 for v in vehicles)
+        debug_info.append(f"run_ortools: 주문 요약 - 주문수: {len(orders)}, 총요청량: {total_demand}, 총수송용량: {total_capacity}, 차량수: {len(vehicles)}")
+    
     depot = "제주물류센터"
     locs = [depot] + [o.주유소명 for o in orders]
     N = len(locs)
@@ -529,6 +535,15 @@ def run_ortools(orders, vehicles, start_times, fuel_type, preferred_vehicle_idx=
     search_params.local_search_metaheuristic = routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
     solution = routing.SolveWithParameters(search_params)
     
+    # 🔹 디버깅: OR-Tools solution 상태 확인
+    if solution is None:
+        debug_info.append(f"run_ortools: ⚠️ OR-Tools가 solution을 찾지 못함 (차량수: {len(vehicles)}, 주문수: {len(orders)})")
+        for v in vehicles:
+            if v.차량번호 in ["제주96바7400", "제주96바7403"]:
+                debug_info.append(f"run_ortools: {v.차량번호} - solution이 None이어서 확인 불가")
+    else:
+        debug_info.append(f"run_ortools: ✅ OR-Tools가 solution을 찾음 (차량수: {len(vehicles)}, 주문수: {len(orders)})")
+    
     routes = []
     fulfilled_indices = set()
     
@@ -598,9 +613,14 @@ def run_ortools(orders, vehicles, start_times, fuel_type, preferred_vehicle_idx=
         for v_idx, v in enumerate(vehicles):
             if v.차량번호 in ["제주96바7400", "제주96바7403"]:
                 if v_idx in used_vehicle_indices_in_ortools:
-                    debug_info.append(f"run_ortools: {v.차량번호} - OR-Tools에서 선택됨 (인덱스: {v_idx})")
+                    debug_info.append(f"run_ortools: {v.차량번호} - ✅ OR-Tools에서 선택됨 (인덱스: {v_idx})")
                 else:
-                    debug_info.append(f"run_ortools: {v.차량번호} - OR-Tools에서 선택되지 않음 (인덱스: {v_idx}, 주문수: {len(orders)})")
+                    debug_info.append(f"run_ortools: {v.차량번호} - ❌ OR-Tools에서 선택되지 않음 (인덱스: {v_idx}, 주문수: {len(orders)}, 선택된차량수: {len(used_vehicle_indices_in_ortools)})")
+    else:
+        # solution이 None인 경우
+        for v_idx, v in enumerate(vehicles):
+            if v.차량번호 in ["제주96바7400", "제주96바7403"]:
+                debug_info.append(f"run_ortools: {v.차량번호} - ⚠️ solution이 None이어서 확인 불가 (인덱스: {v_idx})")
     
     # 🔹 디버깅 정보를 반환값에 포함 (임시로 print로 출력)
     if debug_info:
