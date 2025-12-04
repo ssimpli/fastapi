@@ -314,8 +314,15 @@ def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
         # 🔹 남은 주문 처리 시에는 제약 없이 모든 차량 사용 (단, 제주96바7408은 SK 주유소에 배차 안됨)
         routes, remaining = run_ortools(remaining_orders, current_vehicles, current_starts, fuel_type, preferred_vehicle_idx=None)
         
+        # 🔹 OR-Tools가 해를 찾지 못했을 때도 계속 시도 (시간 제약으로 인한 실패일 수 있음)
+        # 단, 주문이 하나도 처리되지 않았고, 모든 차량이 18:00 이후가 되면 종료
         if not routes and len(remaining) == len(remaining_orders):
-            break
+            # 모든 차량이 18:00 이후가 되었는지 확인
+            all_vehicles_after_close = all(vehicle_state[i] >= WAREHOUSE_CLOSE_TIME for i in range(len(my_vehicles)))
+            if all_vehicles_after_close:
+                break
+            # 일부 차량이 아직 18:00 전이면 다음 라운드에서 다시 시도
+            debug_logs.append(f"라운드 {round_num}: OR-Tools 해 탐색 실패 (시간 제약 또는 용량 제약 가능), 다음 라운드 재시도")
 
         for r in routes:
             real_v_idx = available_indices[r['internal_idx']]
@@ -426,7 +433,21 @@ def run_ortools(orders, vehicles, start_times, fuel_type, preferred_vehicle_idx=
     
     for i, order in enumerate(orders):
         index = manager.NodeToIndex(i + 1)
-        time_dim.CumulVar(index).SetRange(order.start_min, order.end_min)
+        # 🔹 주문의 종료 시간이 너무 이른 경우를 대비하여, 최소한 가장 이른 차량의 시작 시간 + 이동시간 + 하역시간 이상으로 설정
+        # (단, 원래 end_min이 더 늦으면 원래 값 사용, 또는 18:00 이후인 경우 23:59까지 허용)
+        min_start_time = min(start_times) if start_times else DRIVER_START_TIME
+        min_travel_time = get_driving_time(depot, order.주유소명)
+        min_service_time = GASOLINE_UNLOADING_TIME if fuel_type == "휘발유" else DIESEL_UNLOADING_TIME
+        min_arrival_time = min_start_time + min_travel_time + min_service_time
+        
+        # 원래 end_min이 18:00 이후이거나, 계산된 최소 도착 시간보다 늦으면 그대로 사용
+        # 원래 end_min이 너무 이르면 최소 도착 시간으로 조정 (단, 원래 값이 18:00 이후면 원래 값 사용)
+        if order.end_min >= WAREHOUSE_CLOSE_TIME:
+            effective_end_min = order.end_min  # 18:00 이후면 원래 값 사용
+        else:
+            effective_end_min = max(order.end_min, min_arrival_time)  # 더 이른 값 중 큰 값 사용
+        
+        time_dim.CumulVar(index).SetRange(order.start_min, effective_end_min)
     
         if order.priority == 1:
             # 🔹 필수 방문: Disjunction 안 걸어줌
