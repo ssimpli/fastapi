@@ -1,4 +1,4 @@
-import json
+\import json
 import os
 import requests
 import math
@@ -70,6 +70,16 @@ class OrderItem(BaseModel):
                             data[field] = int(data[field])
                     except:
                         data[field] = 0
+            # 🔹 알뜰 주유소 휘발유 150드럼(150L 단위 기준) 이상 주문은 자동으로 우선순위 1로 설정
+            try:
+                brand = data.get('브랜드', '')
+                gasoline = int(data.get('휘발유', 0) or 0)
+                if brand == '알뜰' and gasoline >= 150:
+                    # 사용자가 이미 priority=1을 명시했다면 그대로 유지, 그 외에는 1로 강제
+                    data['priority'] = 1
+            except Exception:
+                # 변환 오류 시에는 우선순위 규칙만 건너뜀
+                pass
         return data
 
 class VehicleItem(BaseModel):
