@@ -303,6 +303,8 @@ def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
                 # 🔹 차량이 물류센터에 도착한 후 적재를 완료한 시간이 출발 시간
                 preferred_start = [vehicle_state[preferred_vehicle_idx] + LOADING_TIME]
                 
+                # 🔹 디버깅: 알뜰 주유소 전용 run_ortools 호출
+                debug_logs.append(f"라운드 {round_num}: 알뜰 주유소 전용 run_ortools 호출 - 차량: 제주96바7408, 주문수: {len(altteul_orders)}")
                 routes_preferred, remaining_altteul = run_ortools(
                     altteul_orders, preferred_vehicle, preferred_start, fuel_type, preferred_vehicle_idx=0
                 )
@@ -366,6 +368,8 @@ def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
         current_starts = [vehicle_state[i] + LOADING_TIME for i in available_indices]
         
         # 🔹 남은 주문 처리 시에는 제약 없이 모든 차량 사용 (단, 제주96바7408은 SK 주유소에 배차 안됨)
+        # 🔹 디버깅: run_ortools 호출 전 상태
+        debug_logs.append(f"라운드 {round_num}: run_ortools 호출 - 차량수: {len(current_vehicles)}, 주문수: {len(remaining_orders)}, 차량목록: {[v.차량번호 for v in current_vehicles]}")
         routes, remaining = run_ortools(remaining_orders, current_vehicles, current_starts, fuel_type, preferred_vehicle_idx=None)
         
         if not routes and len(remaining) == len(remaining_orders):
@@ -373,17 +377,26 @@ def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
 
         # 🔹 사용된 차량 인덱스 추적
         used_vehicle_indices = set()
+        used_vehicle_numbers = []
         for r in routes:
             real_v_idx = available_indices[r['internal_idx']]
             used_vehicle_indices.add(real_v_idx)
+            vehicle_number = my_vehicles[real_v_idx].차량번호
+            used_vehicle_numbers.append(vehicle_number)
             
             # 🔹 차량이 물류센터에 도착한 시간으로 저장 (적재 시작 가능 시간)
             vehicle_state[real_v_idx] = r['end_time']
             vehicle_workload[real_v_idx] += r["total_load"]       # 🔹이 차량 누적 수송량 증가
             
             r['round'] = round_num
-            r['vehicle_id'] = my_vehicles[real_v_idx].차량번호
+            r['vehicle_id'] = vehicle_number
             final_schedule.append(r)
+        
+        # 🔹 디버깅: 실제로 배차된 차량 확인
+        if routes:
+            debug_logs.append(f"라운드 {round_num}: 배차 완료 - 사용된 차량: {', '.join(used_vehicle_numbers)}, 배차수: {len(routes)}")
+        else:
+            debug_logs.append(f"라운드 {round_num}: 배차 실패 - routes가 비어있음")
         
         # 🔹 디버깅: 사용되지 않은 차량 확인
         unused_indices = [i for i in available_indices if i not in used_vehicle_indices]
@@ -449,7 +462,12 @@ def run_ortools(orders, vehicles, start_times, fuel_type, preferred_vehicle_idx=
     if orders:
         total_demand = sum(o.휘발유 if fuel_type=="휘발유" else o.등유+o.경유 for o in orders)
         total_capacity = sum(v.수송용량 for v in vehicles)
+        # 주문 시간 제약 확인
+        time_ranges = [(o.start_min, o.end_min) for o in orders]
+        min_start = min(o.start_min for o in orders) if orders else 0
+        max_end = max(o.end_min for o in orders) if orders else 0
         debug_info.append(f"run_ortools: 주문 요약 - 주문수: {len(orders)}, 총요청량: {total_demand}, 총수송용량: {total_capacity}, 차량수: {len(vehicles)}")
+        debug_info.append(f"run_ortools: 시간제약 - 최소시작: {min_start}분({min_start//60:02d}:{min_start%60:02d}), 최대종료: {max_end}분({max_end//60:02d}:{max_end%60:02d}), 차량시작시간: {[f'{s//60:02d}:{s%60:02d}' for s in start_times]}")
     
     depot = "제주물류센터"
     locs = [depot] + [o.주유소명 for o in orders]
@@ -502,15 +520,23 @@ def run_ortools(orders, vehicles, start_times, fuel_type, preferred_vehicle_idx=
     for i in range(len(vehicles)):
         idx = routing.Start(i)
         start_time = int(start_times[i])
-        # 🔹 모든 차량이 정확히 지정된 시간(7:00)에 시작하도록 제약 설정
+        # 🔹 모든 차량이 정확히 지정된 시간에 시작하도록 제약 설정
         time_dim.CumulVar(idx).SetMin(start_time)
         time_dim.CumulVar(idx).SetMax(start_time)  # 최소값과 최대값을 동일하게 설정하여 정확히 해당 시간에 시작
         # 참고: 차량이 물류센터에 돌아오는 시간은 제약하지 않음 (18:00 이후에도 수송 가능)
         # 새로운 배차 시작은 WAREHOUSE_CLOSE_TIME(18:00) 조건으로 제어됨
+        
+        # 🔹 디버깅: 차량 시작 시간 확인
+        if vehicles[i].차량번호 in ["제주96바7400", "제주96바7403"]:
+            debug_info.append(f"run_ortools: {vehicles[i].차량번호} - 시작시간 제약: {start_time}분({start_time//60:02d}:{start_time%60:02d})")
     
     for i, order in enumerate(orders):
         index = manager.NodeToIndex(i + 1)
         time_dim.CumulVar(index).SetRange(order.start_min, order.end_min)
+        
+        # 🔹 디버깅: 주문 시간 제약 확인 (처음 3개만)
+        if i < 3:
+            debug_info.append(f"run_ortools: 주문[{i}] {order.주유소명} - 시간제약: {order.start_min}분({order.start_min//60:02d}:{order.start_min%60:02d}) ~ {order.end_min}분({order.end_min//60:02d}:{order.end_min%60:02d}), 요청량: {order.휘발유 if fuel_type=='휘발유' else order.등유+order.경유}")
     
         if order.priority == 1:
             # 🔹 필수 방문: Disjunction 안 걸어줌
