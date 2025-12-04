@@ -245,6 +245,7 @@ def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
     #   end_time = vehicle_state - LOADING_TIME 이므로,
     #   vehicle_state < WAREHOUSE_CLOSE_TIME + LOADING_TIME 가 되면 한 번 더 가능
     VEHICLE_AVAILABLE_THRESHOLD = WAREHOUSE_CLOSE_TIME + LOADING_TIME
+
     for o in all_orders:
         amt = o.휘발유 if fuel_type == "휘발유" else (o.등유 + o.경유)
         if amt > 0: pending_orders.append(o)
@@ -298,10 +299,10 @@ def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
                         r['vehicle_id'] = my_vehicles[preferred_vehicle_idx].차량번호
                         final_schedule.append(r)
                     
-                    # 남은 알뜰 주문과 SK 주문을 합쳐서 모든 차량으로 처리
+                    # 🔹 남은 알뜰 주문과 SK 주문을 합쳐서 다음 단계에서 7400/7403이 함께 처리
                     remaining_orders = remaining_altteul + sk_orders
                 else:
-                    # 제주96바7408로 처리 못한 경우, 모든 알뜰 주문과 SK 주문을 합쳐서 처리
+                    # 🔹 7408으로 처리 못한 경우, 알뜰+SK 전부를 다른 차량(7400/7403)에게 넘김
                     remaining_orders = altteul_orders + sk_orders
             else:
                 # 알뜰 주유소 주문이 없으면 기존 로직대로
