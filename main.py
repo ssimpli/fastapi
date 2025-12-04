@@ -300,8 +300,8 @@ def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
             if altteul_orders:
                 # 1단계: 알뜰 주유소 주문에 대해 제주96바7408만 사용
                 preferred_vehicle = [my_vehicles[preferred_vehicle_idx]]
-                # 🔹 차량이 물류센터에 도착한 후 적재를 완료한 시간이 출발 시간
-                preferred_start = [vehicle_state[preferred_vehicle_idx] + LOADING_TIME]
+                # 🔹 예전 코드와 동일하게: vehicle_state가 이미 적재 완료 시간이므로 그대로 사용
+                preferred_start = [vehicle_state[preferred_vehicle_idx]]
                 
                 # 🔹 디버깅: 알뜰 주유소 전용 run_ortools 호출
                 debug_logs.append(f"라운드 {round_num}: 알뜰 주유소 전용 run_ortools 호출 - 차량: 제주96바7408, 주문수: {len(altteul_orders)}")
@@ -313,7 +313,8 @@ def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
                 if routes_preferred:
                     for r in routes_preferred:
                         # 🔹 차량이 물류센터에 도착한 시간으로 저장 (적재 시작 가능 시간)
-                        vehicle_state[preferred_vehicle_idx] = r['end_time']
+                        # 예전 코드와 동일하게: 복귀 시간 + 적재 시간 = 다음 배차 시작 가능 시간
+                        vehicle_state[preferred_vehicle_idx] = r['end_time'] + LOADING_TIME
                         vehicle_workload[preferred_vehicle_idx] += r["total_load"]
                         r['round'] = round_num
                         r['vehicle_id'] = my_vehicles[preferred_vehicle_idx].차량번호
@@ -364,8 +365,8 @@ def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
                 debug_logs.append(f"라운드 {round_num}: {target} - current_vehicles에 포함됨 (총 {len(current_vehicles)}대)")
             else:
                 debug_logs.append(f"라운드 {round_num}: {target} - current_vehicles에 포함되지 않음 (현재 차량: {', '.join(current_vehicle_numbers)})")
-        # 🔹 차량이 물류센터에 도착한 후 적재를 완료한 시간이 출발 시간
-        current_starts = [vehicle_state[i] + LOADING_TIME for i in available_indices]
+        # 🔹 예전 코드와 동일하게: vehicle_state가 이미 적재 완료 시간이므로 그대로 사용
+        current_starts = [vehicle_state[i] for i in available_indices]
         
         # 🔹 남은 주문 처리 시에는 제약 없이 모든 차량 사용 (단, 제주96바7408은 SK 주유소에 배차 안됨)
         # 🔹 디버깅: run_ortools 호출 전 상태
@@ -407,7 +408,8 @@ def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
             used_vehicle_numbers.append(vehicle_number)
             
             # 🔹 차량이 물류센터에 도착한 시간으로 저장 (적재 시작 가능 시간)
-            vehicle_state[real_v_idx] = r['end_time']
+            # 예전 코드와 동일하게: 복귀 시간 + 적재 시간 = 다음 배차 시작 가능 시간
+            vehicle_state[real_v_idx] = r['end_time'] + LOADING_TIME
             vehicle_workload[real_v_idx] += r["total_load"]       # 🔹이 차량 누적 수송량 증가
             
             r['round'] = round_num
@@ -480,6 +482,29 @@ def run_ortools(orders, vehicles, start_times, fuel_type, preferred_vehicle_idx=
         if v.차량번호 in ["제주96바7400", "제주96바7403"]:
             debug_info.append(f"run_ortools: {v.차량번호} - vehicles 리스트에 포함됨 (인덱스: {i}, 수송용량: {v.수송용량}, 시작시간: {start_times[i]}분)")
     
+    # 🔹 시간제약이 불가능한 주문 필터링 (차량 시작 시간 기준)
+    depot = "제주물류센터"
+    feasible_orders = []
+    min_start_time = min(start_times) if start_times else 450
+    for order in orders:
+        depot_to_order = get_driving_time(depot, order.주유소명)
+        earliest_arrival = min_start_time + depot_to_order
+        # 도착 가능 시간이 주문의 종료 시간을 초과하면 제외
+        if earliest_arrival > order.end_min:
+            debug_info.append(f"run_ortools: ⚠️ {order.주유소명} 주문 제외 (도착시간 {earliest_arrival}분({earliest_arrival//60:02d}:{earliest_arrival%60:02d}) > 종료시간 {order.end_min}분({order.end_min//60:02d}:{order.end_min%60:02d}))")
+        else:
+            feasible_orders.append(order)
+    
+    if len(feasible_orders) < len(orders):
+        debug_info.append(f"run_ortools: 시간제약으로 {len(orders) - len(feasible_orders)}개 주문 제외됨 ({len(orders)}개 → {len(feasible_orders)}개)")
+    
+    orders = feasible_orders
+    if not orders:
+        debug_info.append(f"run_ortools: ⚠️ 모든 주문이 시간제약으로 제외됨")
+        if debug_info:
+            print("\n".join(debug_info))
+        return [], []
+    
     # 🔹 디버깅: 주문 정보 요약
     if orders:
         total_demand = sum(o.휘발유 if fuel_type=="휘발유" else o.등유+o.경유 for o in orders)
@@ -491,7 +516,6 @@ def run_ortools(orders, vehicles, start_times, fuel_type, preferred_vehicle_idx=
         debug_info.append(f"run_ortools: 주문 요약 - 주문수: {len(orders)}, 총요청량: {total_demand}, 총수송용량: {total_capacity}, 차량수: {len(vehicles)}")
         debug_info.append(f"run_ortools: 시간제약 - 최소시작: {min_start}분({min_start//60:02d}:{min_start%60:02d}), 최대종료: {max_end}분({max_end//60:02d}:{max_end%60:02d}), 차량시작시간: {[f'{s//60:02d}:{s%60:02d}' for s in start_times]}")
     
-    depot = "제주물류센터"
     locs = [depot] + [o.주유소명 for o in orders]
     N = len(locs)
     
