@@ -478,6 +478,12 @@ def run_ortools(orders, vehicles, start_times, fuel_type, preferred_vehicle_idx=
     for i in range(N):
         for j in range(N):
             if i != j: durations[i][j] = get_driving_time(locs[i], locs[j])
+    
+    # 🔹 디버깅: 물류센터에서 첫 번째 주문까지의 이동 시간 확인
+    if orders and len(orders) > 0:
+        first_order_name = orders[0].주유소명
+        depot_to_first = get_driving_time("제주물류센터", first_order_name)
+        debug_info.append(f"run_ortools: 물류센터 → {first_order_name} 이동시간: {depot_to_first}분")
 
     manager = pywrapcp.RoutingIndexManager(N, len(vehicles), 0)
     routing = pywrapcp.RoutingModel(manager)
@@ -564,6 +570,26 @@ def run_ortools(orders, vehicles, start_times, fuel_type, preferred_vehicle_idx=
     # 🔹 디버깅: OR-Tools solution 상태 확인
     if solution is None:
         debug_info.append(f"run_ortools: ⚠️ OR-Tools가 solution을 찾지 못함 (차량수: {len(vehicles)}, 주문수: {len(orders)})")
+        # 🔹 solution을 찾지 못한 이유 분석
+        # 시간 제약이 너무 엄격한 주문 확인
+        tight_orders = []
+        for o in orders:
+            time_window = o.end_min - o.start_min
+            if time_window < 120:  # 2시간 미만
+                tight_orders.append(f"{o.주유소명}({time_window}분)")
+        if tight_orders:
+            debug_info.append(f"run_ortools: ⚠️ 시간제약이 엄격한 주문: {', '.join(tight_orders[:5])}")
+        
+        # 🔹 첫 번째 주문의 도착 가능 시간 계산
+        if orders and len(orders) > 0:
+            first_order = orders[0]
+            min_start_time = min(start_times) if start_times else 450
+            depot_to_first = get_driving_time("제주물류센터", first_order.주유소명)
+            earliest_arrival = min_start_time + depot_to_first
+            debug_info.append(f"run_ortools: 첫 주문({first_order.주유소명}) 도착 가능 시간: {earliest_arrival}분({earliest_arrival//60:02d}:{earliest_arrival%60:02d}), 요구시간: {first_order.start_min}분({first_order.start_min//60:02d}:{first_order.start_min%60:02d}) ~ {first_order.end_min}분({first_order.end_min//60:02d}:{first_order.end_min%60:02d})")
+            if earliest_arrival > first_order.end_min:
+                debug_info.append(f"run_ortools: ⚠️ 첫 주문 도착 불가능! (도착시간 {earliest_arrival}분 > 종료시간 {first_order.end_min}분)")
+        
         for v in vehicles:
             if v.차량번호 in ["제주96바7400", "제주96바7403"]:
                 debug_info.append(f"run_ortools: {v.차량번호} - solution이 None이어서 확인 불가")
