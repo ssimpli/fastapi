@@ -269,11 +269,16 @@ def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
     vehicle_state = {i: DRIVER_START_TIME for i in range(len(my_vehicles))} 
     vehicle_workload = {i: 0 for i in range(len(my_vehicles))}  # 🔹추가: 누적 수송량
     final_schedule = []
+    round_num = 1
     
-    for round_num in range(1, 6):
-        if not pending_orders: break
+    # 🔹 더 이상 배차 가능한 차량이 없거나, 처리할 주문이 없을 때까지 반복
+    #    (기존: 최대 5라운드로 고정 → 일부 주문이 남아도 추가 라운드가 생성되지 않는 문제)
+    while True:
+        if not pending_orders:
+            break
         available_indices = [i for i, t in vehicle_state.items() if t < VEHICLE_AVAILABLE_THRESHOLD]
-        if not available_indices: break
+        if not available_indices:
+            break
 
         # 🔹 휘발유이고 알뜰 주유소 주문이 있는 경우, 제주96바7408 우선 사용
         if fuel_type == "휘발유" and preferred_vehicle_idx is not None and preferred_vehicle_idx in available_indices:
@@ -387,6 +392,12 @@ def solve_multitrip_vrp(all_orders, all_vehicles, fuel_type):
             final_schedule.append(r)
             
         pending_orders = remaining
+        round_num += 1
+        
+        # 🔹 안전장치: 혹시라도 비정상적으로 라운드가 너무 많이 돌 경우를 방지
+        if round_num > 10:
+            debug_logs.append("라운드 10회를 초과하여 안전 종료")
+            break
 
     # 🔹 미처리 주문 상세 정보 생성
     skipped_list = []
