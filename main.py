@@ -12,7 +12,15 @@ try:
 except ImportError:
     print("❌ OR-Tools 설치 필요")
 
+HTTP_SESSION = requests.Session()
+HTTP_SESSION.mount("https://", requests.adapters.HTTPAdapter(pool_connections=10, pool_maxsize=20))
+HTTP_SESSION.mount("http://", requests.adapters.HTTPAdapter(pool_connections=10, pool_maxsize=20))
 app = FastAPI()
+
+
+@app.on_event("shutdown")
+def close_http_session():
+    HTTP_SESSION.close()
 
 # ==========================================
 # 1. 설정 및 환경변수
@@ -108,7 +116,7 @@ def load_data():
     if url:
         try:
             print(f"🌐 URL 데이터 다운로드 시도...")
-            res = requests.get(url, timeout=15)
+            res = HTTP_SESSION.get(url, timeout=10)
             if res.status_code == 200: 
                 raw_data = res.json()
                 print("✅ URL에서 매트릭스 데이터 로드 성공!")
@@ -148,22 +156,29 @@ load_data()
 # 거리/시간 계산 (최적화된 버전)
 def get_driving_time(start_name, end_name):
     key = f"{start_name}->{end_name}"
-    if key in DIST_CACHE: return DIST_CACHE[key]
-    
+    if key in DIST_CACHE:
+        return DIST_CACHE[key]
+
+    if start_name == end_name:
+        DIST_CACHE[key] = 0
+        return 0
+
     # 1순위: 미리 로드된 매트릭스 파일 사용 (가장 빠름)
     if start_name in MATRIX_DATA and end_name in MATRIX_DATA[start_name]:
         try:
             # 데이터가 km 단위라고 가정하고 시간(분)으로 변환
             # 시속 40km/h 가정: 거리(km) * 1.5 = 소요시간(분)
             dist_val = float(MATRIX_DATA[start_name][end_name])
-            minutes = int(dist_val * 1.5)
+            minutes = max(5, int(dist_val * 1.5))
             # 너무 짧으면 기본 5분
-            return max(5, minutes)
+            DIST_CACHE[key] = minutes
+            return minutes
         except:
             pass
 
     # 2순위: 좌표가 없으면 기본값
-    if start_name not in NODE_INFO or end_name not in NODE_INFO: 
+    if start_name not in NODE_INFO or end_name not in NODE_INFO:
+        DIST_CACHE[key] = 20
         return 20
     
     # 3순위: 네이버 API (매트릭스 파일에 데이터가 없을 때만 호출)
@@ -182,7 +197,7 @@ def get_driving_time(start_name, end_name):
                 "goal": f"{goal['lon']},{goal['lat']}",
                 "option": "trafast"
             }
-            res = requests.get(url, headers=headers, params=params, timeout=3)
+            res = HTTP_SESSION.get(url, headers=headers, params=params, timeout=2)
             if res.status_code == 200:
                 json_res = res.json()
                 if json_res["code"] == 0:
@@ -200,7 +215,9 @@ def get_driving_time(start_name, end_name):
     a = math.sin(dLat/2)**2 + math.cos(math.radians(start['lat'])) * math.cos(math.radians(goal['lat'])) * math.sin(dLon/2)**2
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
     dist_km = R * c
-    return max(5, int((dist_km / 40) * 60 * 1.3))
+    minutes = max(5, int((dist_km / 40) * 60 * 1.3))
+    DIST_CACHE[key] = minutes
+    return minutes
 
 # 상세 경로 좌표 가져오기 (결과 생성 시에만 호출)
 def get_detailed_path_geometry(start_name, end_name):
@@ -222,7 +239,7 @@ def get_detailed_path_geometry(start_name, end_name):
             "goal": f"{goal['lon']},{goal['lat']}",
             "option": "trafast"
         }
-        res = requests.get(url, headers=headers, params=params, timeout=5)
+        res = HTTP_SESSION.get(url, headers=headers, params=params, timeout=3)
         if res.status_code == 200:
             json_res = res.json()
             if json_res["code"] == 0:
